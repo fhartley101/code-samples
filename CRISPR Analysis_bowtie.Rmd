@@ -1,0 +1,2472 @@
+---
+title: "miRNA CRISPR Analysis - MDA-MB-231"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+root_directory <- "C:/Users/fhartley/Documents/Project/CRISPR miRNA/6 - Analysis/Analysis - Bowtie/"
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root_directory)
+options(stringsAsFactors = FALSE)
+
+fdr <- 0.05
+
+```
+
+# Load packages
+
+```{r}
+
+library(ggplot2)
+library(ggfortify)
+library(reshape2)
+library(ComplexHeatmap)
+library(tidyr)
+library(gridExtra)
+library(EnhancedVolcano)
+library(eulerr)
+library(msigdbr)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(TCGAbiolinks)
+library(stringr)
+library(Hmisc)
+#library(SummarizedExperiment)
+
+list_packages <- (.packages())
+
+x <- vector()
+for(i in list_packages){
+  x[[i]] <- package.version(i)
+}
+
+PackageVersion <- data.frame(row.names = list_packages, Version = x)
+write.csv(PackageVersion, "Package Versions.csv")
+
+```
+
+# Import the data
+
+```{r}
+
+# Metadata
+metadata <- read.csv("C:/Users/fhartley/Documents/Project/CRISPR miRNA/6 - Analysis/metadata.csv", row.names = 1)
+metadata$Treatment <- factor(metadata$Treatment, levels = c(NA, "Normoxia", "Hypoxia"))
+metadata$Sample <- factor(metadata$Sample, levels = c("T0", "T7_N", "T7_H", "T14_N", "T14_H"))
+metadata$Replicate <- factor(metadata$Replicate, levels = c("Rep1", "Rep2", "Rep3"))
+
+
+# Import the counts
+counts <- read.csv("C:/Users/fhartley/Documents/Project/CRISPR miRNA/6 - Analysis/cluster/bowtie/idxstats/P220159_bowtie.count.csv", row.names = 1) # Import counts file
+counts <- counts[,-1] # Remove "genes" column, leaving only counts
+
+
+# Import the normalised counts (ones created manually)
+norm_counts <- read.csv("C:/Users/fhartley/Documents/Project/CRISPR miRNA/6 - Analysis/cluster/bowtie/idxstats/P220159_bowtie.count_normalised.csv", row.names = 1)
+
+norm_counts <- norm_counts[,-1] # Remove "genes" column, leaving only counts
+
+
+# Create a vector of comparisons
+mycomparisons <- c("T0 vs T7_N", "T0 vs T7_H", "T0 vs T14_N", "T0 vs T14_H", "T7_N vs T7_H", "T14_N vs T14_H")
+
+```
+
+# Guide distribution
+
+```{r}
+
+counts_log2 <- log2(counts) # Log the counts
+
+
+# Histogram of guide distribution
+
+p1 <- lapply(names(counts_log2), function(sample){
+ggplot(counts_log2, mapping = aes_string(sample))+
+    geom_histogram(binwidth = 0.1)+
+    scale_y_continuous(expand = c(0, 0))+
+    scale_x_continuous(expand = c(0, 0.1))+
+    coord_cartesian(ylim = c(0, 400), xlim = c(0, max(round(counts_log2))))+
+    labs(x = expression(Log[2]~Counts),
+         y= "Frequency")+
+    theme(panel.border = element_blank(),
+    axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+    axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+    panel.background = element_rect(fill='transparent'),
+    panel.grid = element_blank(),
+    plot.background = element_rect(fill='transparent', color=NA),
+    axis.title.x = element_text(colour = "black"),
+    axis.title.y = element_text(colour = "black"),
+    axis.text.y = element_text(color = "black", size = 10),
+    axis.text.x = element_text(color = "black", size = 10),
+    plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = sample)
+})
+
+ggsave("Distribution of guides - Histogram.png", marrangeGrob(grobs = p1, ncol = 3, nrow = 5, top = NULL), device = "png", width = 210, height = 297, units = "mm")
+
+
+# Melt the data frame for use in violin plots
+counts_log2_melt <- counts_log2
+counts_log2_melt$guide <- rownames(counts_log2_melt) 
+counts_log2_melt <- melt(counts_log2_melt, id.vars = c("guide"))
+
+
+# Violin plot of guide distribution
+
+ggplot(counts_log2_melt, mapping = aes(x = variable, y = value))+
+    geom_violin(fill = "grey90", size = 0.6)+
+    labs(x = NULL, y = expression(Log[2]~Counts))+
+    scale_x_discrete(guide = guide_axis(n.dodge = 2))+
+    scale_y_continuous(expand = c(0, 0.1))+
+    coord_cartesian(ylim = c(0, 15))+
+    theme(panel.border = element_blank(),
+    axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+    axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+    panel.background = element_rect(fill='transparent'),
+    panel.grid = element_blank(),
+    plot.background = element_rect(fill='transparent', color = NA),
+    axis.title.x = element_text(colour = "black"),
+    axis.title.y = element_text(colour = "black"),
+    axis.text.y = element_text(color = "black", size = 10),
+    axis.text.x = element_text(color = "black", size = 10))
+ggsave("Distribution of guides - Violin plot.png",  device = "png", width = 297, height = 210, units = "mm")
+
+
+```
+
+# Correlation of the samples
+
+```{r}
+
+# Use the normalised counts to produce a matrix of the Pearson correlation.
+
+my_cor <- cor(norm_counts, method = "pearson")
+
+# Generate a clustered heatmap of the correlation coefficients
+svg("Correlation heatmap.svg")
+Heatmap(my_cor, 
+        col = c("orange", "red1"), 
+        column_names_rot = 45,
+        width = unit(10, "cm"), 
+        height = unit(10, "cm"),
+        name = "Pearson \nCorrelation",
+        show_row_dend = F,
+        row_names_gp = gpar(fontsize = 10),
+        column_names_gp = gpar(fontsize = 10),
+        column_dend_gp = gpar(lwd = 1.5),
+        row_names_side = "left",
+        cell_fun = function(j, i, x, y, w, h, col) { # add text to each grid
+        grid.text(round(my_cor, digits = 2)[i, j], x, y, gp = gpar(fontsize = 10))
+    })
+dev.off()
+
+
+```
+
+# Principal component analysis
+
+```{r}
+
+# Transpose the counts file and remove guides with no counts
+counts_t <- t(norm_counts)
+counts_t <- counts_t[,!colSums(counts_t) == 0]
+
+
+# Create a copy of the transposed counts to add sample information to
+all(rownames(counts_t) == metadata$Sample_Name)
+counts_t2 <- as.data.frame(counts_t)
+counts_t2$Sample <- metadata$Sample
+counts_t2$SampleName <- metadata$Sample_Name
+counts_t2$Replicate <- as.factor(metadata$Replicate)
+
+
+# Run principal component analysis
+myPCA <- prcomp(counts_t,
+                 center = TRUE,
+                scale = FALSE) # Same options as plotPCA in DESeq2
+summary(myPCA)
+
+
+# Create a colour palette
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+
+# PCA plots by Sample
+p <- autoplot(myPCA, 
+         data = counts_t2,
+         colour = "Sample")+
+        theme(
+          panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid.major = element_line(color = "grey",
+                                          size = 0.3,
+                                          linetype = 2),
+          panel.grid.minor = element_line(color = "transparent"),
+          plot.background = element_rect(fill ="transparent", color = NA),
+          axis.title.x = element_text(colour = "black", size = 12),
+          axis.title.y = element_text(colour = "black", size = 12),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          legend.background = element_rect(fill = "transparent"),
+          legend.title = element_blank(),
+          legend.key = element_rect(fill = "transparent", colour = "transparent"),
+          legend.text = element_text(size = 10, colour = "black"))+
+        scale_color_manual(labels = c("T0", "T7 Normoxia", "T7 Hypoxia", "T14 Normoxia", "T14 Hypoxia"),
+                           values = gg_color_hue(length(unique(counts_t2$Sample))))
+p$layers[[1]]$geom$default_aes$size <- 4
+#ggsave("PC1 and PC2 - Sample.png")
+ggsave("POSTER - PC1 and PC2 - Sample.tiff", dpi = 720)
+
+
+p <- autoplot(myPCA, 
+         data = counts_t2,
+         x = 1,
+         y = 3,
+         colour = "Sample")+
+        theme(
+          panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid.major = element_line(color = "grey",
+                                          size = 0.3,
+                                          linetype = 2),
+          panel.grid.minor = element_line(color = "transparent"),
+          plot.background = element_rect(fill ="transparent", color = NA),
+          axis.title.x = element_text(colour = "black", size = 12),
+          axis.title.y = element_text(colour = "black", size = 12),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          legend.background = element_rect(fill = "transparent"),
+          legend.title = element_blank(),
+          legend.key = element_rect(fill = "transparent", colour = "transparent"),
+          legend.text = element_text(size = 10, colour = "black"))+
+        scale_color_manual(labels = c("T0", "T7 Normoxia", "T7 Hypoxia", "T14 Normoxia", "T14 Hypoxia"),
+                           values = gg_color_hue(length(unique(counts_t2$Sample))))
+p$layers[[1]]$geom$default_aes$size <- 4
+ggsave("PC1 and PC3 - Sample.png")
+
+
+p <- autoplot(myPCA, 
+         data = counts_t2,
+         x = 2,
+         y = 3,
+         colour = "Sample")+
+        theme(
+          panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid.major = element_line(color = "grey",
+                                          size = 0.3,
+                                          linetype = 2),
+          panel.grid.minor = element_line(color = "transparent"),
+          plot.background = element_rect(fill ="transparent", color = NA),
+          axis.title.x = element_text(colour = "black", size = 12),
+          axis.title.y = element_text(colour = "black", size = 12),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          legend.background = element_rect(fill = "transparent"),
+          legend.title = element_blank(),
+          legend.key = element_rect(fill = "transparent", colour = "transparent"),
+          legend.text = element_text(size = 10, colour = "black"))+
+        scale_color_manual(labels = c("T0", "T7 Normoxia", "T7 Hypoxia", "T14 Normoxia", "T14 Hypoxia"),
+                           values = gg_color_hue(length(unique(counts_t2$Sample))))
+p$layers[[1]]$geom$default_aes$size <- 4
+ggsave("PC2 and PC3 - Sample.png")
+
+
+
+# PCA plots by Replicate
+p <- autoplot(myPCA, 
+         data = counts_t2, 
+         colour = "Replicate")+
+        theme(
+          panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid.major = element_line(color = "grey",
+                                          size = 0.3,
+                                          linetype = 2),
+          panel.grid.minor = element_line(color = "transparent"),
+          plot.background = element_rect(fill ="transparent", color = NA),
+          axis.title.x = element_text(colour = "black", size = 12),
+          axis.title.y = element_text(colour = "black", size = 12),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          legend.background = element_rect(fill = "transparent"),
+          legend.title = element_blank(),
+          legend.key = element_rect(fill = "transparent", colour = "transparent"),
+          legend.text = element_text(size = 10, colour = "black"))+
+        scale_color_manual(labels = c("Replicate 1", "Replicate 2", "Replicate 3"),
+                           values = gg_color_hue(length(unique(counts_t2$Replicate))))
+p$layers[[1]]$geom$default_aes$size <- 4
+ggsave("PC1 and PC2 - Replicate.png")
+
+
+p <- autoplot(myPCA, 
+         data = counts_t2,
+         x = 1,
+         y = 3,
+         colour = "Replicate")+
+        theme(
+          panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid.major = element_line(color = "grey",
+                                          size = 0.3,
+                                          linetype = 2),
+          panel.grid.minor = element_line(color = "transparent"),
+          plot.background = element_rect(fill ="transparent", color = NA),
+          axis.title.x = element_text(colour = "black", size = 12),
+          axis.title.y = element_text(colour = "black", size = 12),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          legend.background = element_rect(fill = "transparent"),
+          legend.title = element_blank(),
+          legend.key = element_rect(fill = "transparent", colour = "transparent"),
+          legend.text = element_text(size = 10, colour = "black"))+
+        scale_color_manual(labels = c("Replicate 1", "Replicate 2", "Replicate 3"),
+                           values = gg_color_hue(length(unique(counts_t2$Replicate))))
+p$layers[[1]]$geom$default_aes$size <- 4
+ggsave("PC1 and PC3 - Replicate.png")
+
+
+p <- autoplot(myPCA, 
+         data = counts_t2,
+         x = 2,
+         y = 3,
+         colour = "Replicate")+
+        theme(
+          panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid.major = element_line(color = "grey",
+                                          size = 0.3,
+                                          linetype = 2),
+          panel.grid.minor = element_line(color = "transparent"),
+          plot.background = element_rect(fill ="transparent", color = NA),
+          axis.title.x = element_text(colour = "black", size = 12),
+          axis.title.y = element_text(colour = "black", size = 12),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          legend.background = element_rect(fill = "transparent"),
+          legend.title = element_blank(),
+          legend.key = element_rect(fill = "transparent", colour = "transparent"),
+          legend.text = element_text(size = 10, colour = "black"))+
+        scale_color_manual(labels = c("Replicate 1", "Replicate 2", "Replicate 3"),
+                           values = gg_color_hue(length(unique(counts_t2$Replicate))))
+p$layers[[1]]$geom$default_aes$size <- 4
+ggsave("PC2 and PC3 - Replicate.png")
+
+p$layers[[1]]$geom$default_aes$size <- 1.5 # fix for future graphs
+
+```
+
+# Import the guide results of differential analysis for each comparison
+
+```{r}
+
+# Create an empty list
+guide_results <- list()
+
+# Import the results files and add each data frame to the list
+for(i in mycomparisons){
+  guide_results[[i]] <- read.table(paste0("C:/Users/fhartley/Documents/Project/CRISPR miRNA/6 - Analysis/cluster/mageck_test/bowtie/P220159_bowtie_", gsub(" ", "", i), ".sgRNA_summary.txt"), row.names = 1)
+}
+
+guide_results <-
+  lapply(names(guide_results), function(i){
+  x <- guide_results[[i]] # Extract the dataframe
+  names(x) <- x[1,] # Set the column names as the first row
+  x <- x[-1,]       # Remove the first row
+  x                 # Return the dataframe
+})
+
+names(guide_results) <- mycomparisons # The above removes the list names, so re-add them
+
+
+# Convert the LFC column to numeric, and add a new column describing the guides rank based on this
+guide_results <-
+  lapply(names(guide_results), function(i){
+      x <- guide_results[[i]] # Extract the dataframe
+      x$LFC <- as.numeric(x$LFC)
+      NewRank <- rank(x[,"LFC"])
+      x <- cbind(x, NewRank)
+      x
+  })
+
+names(guide_results) <- mycomparisons # The above removes the list names, so re-add them
+
+```
+
+# Negative control - the log fold change of non-targeting guides
+
+```{r}
+
+# Assess the log fold change of non-targeting guides
+
+plots_guides <- 
+  lapply(names(guide_results), function(i){
+    x <- guide_results[[i]]
+    ggplot(x, aes(x = NewRank, y = LFC))+
+    geom_point()+
+    geom_point(data = x[x$e == "Control",], 
+               aes(x = NewRank, y = LFC), col = "red", shape = 1)+
+    labs(x = "Rank",
+         y = expression(Log[2]~Fold~Change))+
+    scale_x_continuous(expand = c(0, 400))+
+    scale_y_continuous(expand = c(0, 0.25))+
+    coord_cartesian(ylim = c(min(unlist(lapply(names(guide_results), function(i){
+                                        x <- guide_results[[i]]
+                                        my_min <- min(x$LFC)
+                                        my_min
+                                        }))), 
+                             max(unlist(lapply(names(guide_results), function(i){
+                                        x <- guide_results[[i]]
+                                        my_max <- max(x$LFC)
+                                        my_max
+                                        })))))+
+    theme(
+      panel.border = element_blank(),
+      axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      panel.grid = element_blank(),
+      panel.background = element_rect(fill = "transparent"),
+      plot.background = element_rect(fill = "transparent", color = NA),
+      axis.title.x = element_text(colour = "black", size = 12),
+      axis.title.y = element_text(colour = "black", size = 12),
+      axis.text.y = element_text(color = "black", size = 10),
+      axis.text.x = element_text(color = "black", size = 10),
+      plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = gsub("_N", " Normoxia", gsub("_H", " Hypoxia", i)))
+    ggsave(filename = paste0(gsub(" ", "", i), "/Non-targeting guides - logFC ", i, ".png"), plot = last_plot())
+    last_plot()
+})
+
+ggsave("Non-targeting guides - logFC.png", 
+       marrangeGrob(grobs = plots_guides, 
+                    ncol = 2, 
+                    nrow = 3, 
+                    layout_matrix = matrix(1:6, 3, 2, TRUE), 
+                    top = NULL), 
+       device = "png", 
+       width = 210, 
+       height = 297, 
+       units = "mm")
+
+
+```
+
+# Calculate percetage of non-targeting guides with a log2 fold change less than or greater than zero, and export as a csv
+
+```{r}
+
+# Calculate the percentage of non-targeting guides that have a log2 fold change above and below zero. This should be 50/50
+
+percentage_guides <- data.frame("Percentage of guides with log2FC < 0" = c(
+  (table(guide_results[[1]][guide_results[[1]]$Gene == "Control",]$LFC > 0)[1])/(length(guide_results[[1]][guide_results[[1]]$Gene == "Control",]$LFC))*100,
+(table(guide_results[[2]][guide_results[[2]]$Gene == "Control",]$LFC > 0)[1])/(length(guide_results[[2]][guide_results[[2]]$Gene == "Control",]$LFC))*100,
+(table(guide_results[[3]][guide_results[[3]]$Gene == "Control",]$LFC > 0)[1])/(length(guide_results[[3]][guide_results[[3]]$Gene == "Control",]$LFC))*100,
+(table(guide_results[[4]][guide_results[[4]]$Gene == "Control",]$LFC > 0)[1])/(length(guide_results[[4]][guide_results[[4]]$Gene == "Control",]$LFC))*100
+), 
+                   "Percentage of guides with log2FC > 0" = c(
+  (table(guide_results[[1]][guide_results[[1]]$Gene == "Control",]$LFC > 0)[2])/(length(guide_results[[1]][guide_results[[1]]$Gene == "Control",]$LFC))*100,
+(table(guide_results[[2]][guide_results[[2]]$Gene == "Control",]$LFC > 0)[2])/(length(guide_results[[2]][guide_results[[2]]$Gene == "Control",]$LFC))*100,
+(table(guide_results[[3]][guide_results[[3]]$Gene == "Control",]$LFC > 0)[2])/(length(guide_results[[3]][guide_results[[3]]$Gene == "Control",]$LFC))*100,
+(table(guide_results[[4]][guide_results[[4]]$Gene == "Control",]$LFC > 0)[2])/(length(guide_results[[4]][guide_results[[4]]$Gene == "Control",]$LFC))*100
+                   ))
+
+
+rownames(percentage_guides) <- names(guide_results)[1:4]
+
+write.csv(percentage_guides, "Percetage of non-targeting guides with log2fc greater or less than zero.csv")
+
+```
+
+# Import the gene results of differential analysis for each comparison
+
+```{r}
+
+# Create an empty list
+results <- list()
+
+# Import the gene results files and add each dataframe to the list
+for(i in mycomparisons){
+  results[[i]] <- read.table(paste0("C:/Users/fhartley/Documents/Project/CRISPR miRNA/6 - Analysis/cluster/mageck_test/bowtie/P220159_bowtie_", gsub(" ", "", i), ".gene_summary.txt"), row.names = 1)
+}
+
+# To each of the results dataframes within the list, convert the first row into the column names
+results <-
+  lapply(names(results), function(i){
+  x <- results[[i]] # Extract the dataframe
+  names(x) <- x[1,] # Set the column names as the first row
+  x <- x[-1,]       # Remove the first row
+  x                 # Return the dataframe
+})
+
+names(results) <- mycomparisons # The above removes the list names, so re-add them
+
+# Remove the rows corresponding to the non-targeting guides
+results <-
+  lapply(names(results), function(i){
+  x <- results[[i]]                       # Extract the dataframe
+  x <- x[!rownames(x) == "Control",]      # Remove non-targeting rows
+  x                                       # Return the dataframe
+})
+
+names(results) <- mycomparisons # The above removes the list names, so re-add them
+
+# Convert the dataframes to numeric. This converts the dataframe to matrices and loses the row names
+results2 <- lapply(results, sapply, as.numeric)
+
+
+# Add a new column describing the rank in the data based only on the log fold change
+results2 <- 
+  lapply(names(results2), function(i){
+  x <- results2[[i]]
+  NewRank <- rank(x[,"neg|lfc"])
+  x <- cbind(x, NewRank)
+  x
+})
+
+names(results2) <- mycomparisons # Add list names again
+
+
+# Re-add the row names, create a new shortened name column, and convert back into dataframes
+results <- 
+  lapply(names(results2), function(i){
+  x <- results2[[i]]
+  rownames(x) <- rownames(results[[i]])
+  miRNA <- substring(rownames(results[[i]]), 5)
+  x <- cbind.data.frame(x, miRNA)
+  x <- as.data.frame(x)
+})
+
+names(results) <- mycomparisons # Add list names again
+
+# Add a new column with relevant p values (i.e. neg|p-value for those with a negative log fold change and pos|p-value for those with a positive log fold change) and FDR values
+
+results <- lapply(names(results), function(i){
+          x <- results[[i]]
+          x$pval <- ifelse(x$`neg|lfc` < 0, x$`neg|p-value`, x$`pos|p-value`)
+          x$fdr <- ifelse(x$`neg|lfc` < 0, x$`neg|fdr`, x$`pos|fdr`)
+          x
+          })
+
+names(results) <- mycomparisons # Add list names again
+
+rm(results2)
+
+```
+
+# Plot the log2FC and highlight significant results
+
+```{r}
+
+plots_log2fc <- 
+  lapply(names(results), function(i){
+    x <- results[[i]]
+    ggplot(x, aes(x = NewRank, y = `neg|lfc`))+
+    geom_point()+
+    geom_point(data = x[x$`neg|fdr` <= fdr,], 
+               aes(x = NewRank, y = `neg|lfc`), col = "red", shape = 1)+
+    labs(x = "Rank",
+         y = expression(Log[2]~Fold~Change))+
+    scale_x_continuous(expand = c(0, 100))+
+    scale_y_continuous(expand = c(0, 0.25))+
+    coord_cartesian(ylim = c(min(unlist(lapply(names(results), function(i){
+                                        x <- results[[i]]
+                                        my_min <- min(x$`neg|lfc`)
+                                        my_min
+                                        }))), 
+                             max(unlist(lapply(names(results), function(i){
+                                        x <- results[[i]]
+                                        my_max <- max(x$`neg|lfc`)
+                                        my_max
+                                        })))))+
+    theme(
+      panel.border = element_blank(),
+      axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      panel.grid = element_blank(),
+      panel.background = element_rect(fill = "transparent"),
+      plot.background = element_rect(fill = "transparent", color = NA),
+      axis.title.x = element_text(colour = "black", size = 12),
+      axis.title.y = element_text(colour = "black", size = 12),
+      axis.text.y = element_text(color = "black", size = 10),
+      axis.text.x = element_text(color = "black", size = 10),
+      plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = gsub("_N", " Normoxia", gsub("_H", " Hypoxia", i)))
+    ggsave(filename = paste0(gsub(" ", "", i), "/Significant miRNAs - logFC ", i, ".png"), plot = last_plot())
+    last_plot()
+})
+
+ggsave("Significant miRNAs - logFC.png", 
+       marrangeGrob(grobs = plots_log2fc, 
+                    ncol = 2, 
+                    nrow = 3, 
+                    layout_matrix = matrix(1:6, 3, 2, TRUE), 
+                    top = NULL), 
+       device = "png", 
+       width = 210, 
+       height = 297, 
+       units = "mm")
+
+```
+
+# Plot the log2FC and highlight significant results (scaled for normoxia vs hypoxia comparisons)
+
+```{r}
+
+lapply(names(results)[5:6], function(i){
+    x <- results[[i]]
+    ggplot(x, aes(x = NewRank, y = `neg|lfc`))+
+    geom_point()+
+    geom_point(data = x[x$`neg|fdr` <= fdr,], 
+               aes(x = NewRank, y = `neg|lfc`), col = "red", shape = 1)+
+    labs(x = "Rank",
+         y = expression(Log[2]~Fold~Change))+
+    scale_x_continuous(expand = c(0, 100))+
+    scale_y_continuous(expand = c(0, 0.1))+
+    coord_cartesian(ylim = c(-max(abs(c(min(unlist(lapply(names(results)[5:6], function(i){
+                                        x <- results[[i]]
+                                        my_min <- min(x$`neg|lfc`)
+                                        my_min
+                                        }))), 
+                             max(unlist(lapply(names(results)[5:6], function(i){
+                                        x <- results[[i]]
+                                        my_max <- max(x$`neg|lfc`)
+                                        my_max
+                                        })))))), 
+                             max(abs(c(min(unlist(lapply(names(results)[5:6], function(i){
+                                        x <- results[[i]]
+                                        my_min <- min(x$`neg|lfc`)
+                                        my_min
+                                        }))), 
+                             max(unlist(lapply(names(results)[5:6], function(i){
+                                        x <- results[[i]]
+                                        my_max <- max(x$`neg|lfc`)
+                                        my_max
+                                        }))))))))+
+    theme(
+      panel.border = element_blank(),
+      axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      panel.grid = element_blank(),
+      panel.background = element_rect(fill = "transparent"),
+      plot.background = element_rect(fill = "transparent", color = NA),
+      axis.title.x = element_text(colour = "black", size = 12),
+      axis.title.y = element_text(colour = "black", size = 12),
+      axis.text.y = element_text(color = "black", size = 10),
+      axis.text.x = element_text(color = "black", size = 10),
+      plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = gsub("_N", " Normoxia", gsub("_H", " Hypoxia", i)))
+    ggsave(filename = paste0(gsub(" ", "", i), "/Significant miRNAs - logFC scaled ", i, ".png"), plot = last_plot())
+    last_plot()
+})
+
+```
+
+# Generate volcano plots displaying all significant miRNAs
+
+```{r}
+
+# Generate volcano plots highlighting the significant genes
+volcano_plots <-
+  lapply(names(results), function(i){
+      x <- results[[i]]
+      EnhancedVolcano(x,
+        lab = x$miRNA,
+        x = "neg|lfc",
+        y = "fdr",
+        xlab = expression("Log"[2]*" Fold Change"),
+        ylab = expression("-Log"[10]*" FDR"),
+        title = gsub("_N", " Normoxia", gsub("_H", " Hypoxia", i)),
+        titleLabSize = 14,
+        pCutoff = fdr,
+        FCcutoff = 1,
+        pointSize = 2.5,
+        labSize = 4,
+        col = c("grey60", "grey60", "grey60", "red2"),
+        gridlines.minor = FALSE,
+        cutoffLineWidth = 0.5,
+        legendPosition = "none",
+        caption = NULL,
+        subtitle = NULL
+        #selectLab = c('ALDOC','CA9')
+        )+
+      coord_cartesian(xlim = c(-round(max(abs(x$`neg|lfc`)), 1),
+                               round(max(abs(x$`neg|lfc`)), 1)),
+                      ylim = c(0, max(-log10(x$fdr), na.rm = TRUE) + 3))+
+      scale_y_continuous(expand = c(0, 0))+
+      theme(
+      axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      axis.title.x = element_text(colour = "black", size = 12),
+      axis.title.y = element_text(colour = "black", size = 12),
+      axis.text.y = element_text(color = "black", size = 10),
+      axis.text.x = element_text(color = "black", size = 10),
+      plot.title = element_text(hjust = 0.5))
+    ggsave(filename = paste0(gsub(" ", "", i), "/Volcano plot - all genes ", i, ".png"), plot = last_plot())
+    last_plot()
+})
+
+ggsave("Volcano plots - all genes.png", 
+       marrangeGrob(grobs = volcano_plots, 
+                    ncol = 2, 
+                    nrow = 3, 
+                    layout_matrix = matrix(1:6, 3, 2, TRUE), 
+                    top = NULL), 
+       device = "png", 
+       width = 210, 
+       height = 297, 
+       units = "mm")
+
+```
+
+# Generate volcano plots displaying all significant miRNAs using the p value for the y axis. This better displays the normoxia vs hypoxia results. Reduce the log2 fold change cut off for the normoxia vs hypoxia comparisons.
+
+```{r}
+
+# Generate volcano plots highlighting the significant genes
+volcano_plots <-
+  lapply(names(results), function(i){
+      x <- results[[i]]
+      EnhancedVolcano(x,
+        lab = x$miRNA,
+        x = "neg|lfc",
+        y = "pval",
+        xlab = expression("Log"[2]*" Fold Change"),
+        #ylab = expression("-Log"[10]*" FDR"),
+        title = gsub("_N", " Normoxia", gsub("_H", " Hypoxia", i)),
+        titleLabSize = 14,
+        pCutoff = fdr,
+        FCcutoff = 1,
+        pointSize = 2.5,
+        labSize = 4,
+        col = c("grey60", "grey60", "grey60", "red2"),
+        gridlines.minor = FALSE,
+        cutoffLineWidth = 0.5,
+        legendPosition = "none",
+        caption = NULL,
+        subtitle = NULL
+        #selectLab = c('ALDOC','CA9')
+        )+
+      coord_cartesian(xlim = c(-round(max(abs(x$`neg|lfc`)), 1),
+                               round(max(abs(x$`neg|lfc`)), 1)),
+                      ylim = c(0, max(-log10(x$pval), na.rm = TRUE) + 3))+
+      scale_y_continuous(expand = c(0, 0))+
+      theme(
+      axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      axis.title.x = element_text(colour = "black", size = 12),
+      axis.title.y = element_text(colour = "black", size = 12),
+      axis.text.y = element_text(color = "black", size = 10),
+      axis.text.x = element_text(color = "black", size = 10),
+      plot.title = element_text(hjust = 0.5))
+    ggsave(filename = paste0(gsub(" ", "", i), "/Volcano plot - all genes ", i, " (pval).png"), plot = last_plot())
+    last_plot()
+})
+
+ggsave("Volcano plots - all genes (pval).png", 
+       marrangeGrob(grobs = volcano_plots, 
+                    ncol = 2, 
+                    nrow = 3, 
+                    layout_matrix = matrix(1:6, 3, 2, TRUE), 
+                    top = NULL), 
+       device = "png", 
+       width = 210, 
+       height = 297, 
+       units = "mm")
+
+
+# Generate volcano plots highlighting the significant genes and reducing the log2 fold change cut off
+
+lapply(names(results)[6], function(i){
+      x <- results[[i]]
+      EnhancedVolcano(x,
+        lab = x$miRNA,
+        x = "neg|lfc",
+        y = "pval",
+        xlab = expression("Log"[2]*" Fold Change"),
+        #ylab = expression("-Log"[10]*" FDR"),
+        title = gsub("_N", " Normoxia", gsub("_H", " Hypoxia", i)),
+        titleLabSize = 14,
+        pCutoff = fdr,
+        FCcutoff = 0.3,
+        pointSize = 2.5,
+        labSize = 4,
+        col = c("grey60", "grey60", "grey60", "red2"),
+        gridlines.minor = FALSE,
+        cutoffLineWidth = 0.5,
+        legendPosition = "none",
+        caption = NULL,
+        subtitle = NULL,
+        selectLab = c("mir-1299", "mir-3127", "mir-639", "mir-6752", "mir-1184", "mir-30e", "mir-4655", "mir-3649", "mir-5196", "mir-7641")
+        )+
+      coord_cartesian(xlim = c(-round(max(abs(x$`neg|lfc`)), 1),
+                               round(max(abs(x$`neg|lfc`)), 1)),
+                      ylim = c(0, max(-log10(x$pval), na.rm = TRUE) + 3))+
+      scale_y_continuous(expand = c(0, 0))+
+      theme(
+      axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      axis.title.x = element_text(colour = "black", size = 12),
+      axis.title.y = element_text(colour = "black", size = 12),
+      axis.text.y = element_text(color = "black", size = 10),
+      axis.text.x = element_text(color = "black", size = 10),
+      plot.title = element_text(hjust = 0.5))
+    ggsave(filename = paste0(gsub(" ", "", i), "/Volcano plot - all genes ", i, " (pval and reduced log2fc).png"), plot = last_plot(), units = "px", width = 2100, height = 2100)
+    last_plot()
+})
+
+
+```
+
+# Write csvs of positive and negative miRNAs for each comparison
+
+```{r}
+
+# Genes that are significant and have a negative log2 fold change (i.e. depleted genes)
+lapply(names(results), function(i){
+      x <- results[[i]]
+      x <- x[x$`neg|fdr` <= fdr,]
+      write.csv(x, file = paste0(gsub(" ", "", i), "/Depleted miRNAs - ", i, ".csv"))
+})
+
+
+# Genes that are significant and have a positive log2 fold change (i.e. enriched genes)
+lapply(names(results), function(i){
+      x <- results[[i]]
+      x <- x[x$`pos|fdr` <= fdr,]
+      write.csv(x, file = paste0(gsub(" ", "", i), "/Enriched miRNAs - ", i, ".csv"))
+})
+
+# Make second copies using 0.1 as the FDR cutoff
+
+# Genes that are significant and have a negative log2 fold change (i.e. depleted genes)
+lapply(names(results), function(i){
+      x <- results[[i]]
+      x <- x[x$`neg|fdr` <= 0.1,]
+      write.csv(x, file = paste0(gsub(" ", "", i), "/Depleted miRNAs (fdr01) - ", i, ".csv"))
+})
+
+
+# Genes that are significant and have a positive log2 fold change (i.e. enriched genes)
+lapply(names(results), function(i){
+      x <- results[[i]]
+      x <- x[x$`pos|fdr` <= 0.1,]
+      write.csv(x, file = paste0(gsub(" ", "", i), "/Enriched miRNAs (fdr01) - ", i, ".csv"))
+})
+
+
+```
+
+# Write a csv which counts the number of positive and negative genes at different FDRs
+
+```{r}
+
+lapply(names(results), function(i){
+      x <- results[[i]]
+      sig_genes <- data.frame("DepletedGenes" = c(
+        "padj_0.2" = nrow(x[x$`neg|fdr` <= 0.2,]), 
+        "padj_0.1" = nrow(x[x$`neg|fdr` <= 0.1,]), 
+        "padj_0.05" = nrow(x[x$`neg|fdr` <= 0.05,]), 
+        "padj_0.01" = nrow(x[x$`neg|fdr` <= 0.01,])), 
+                                      "EnrichedGenes" = c(
+        "padj_0.2" = nrow(x[x$`pos|fdr` <= 0.2,]),
+        "padj_0.1" = nrow(x[x$`pos|fdr` <= 0.1,]),
+        "padj_0.05" = nrow(x[x$`pos|fdr` <= 0.05,]),
+        "padj_0.01" = nrow(x[x$`pos|fdr` <= 0.01,])))
+write.csv(sig_genes, file = paste0(gsub(" ", "", i), "/Number of significant miRNAs ", i, ".csv"))
+})
+
+```
+
+# Venn diagrams showing the overlap at different timepoints and comparison of the log2 fold changes
+
+```{r}
+
+# Load depleted miRNAs
+venn_list <- lapply(names(results), function(i){
+      neg <- read.csv(file = paste0(gsub(" ", "", i), "/Depleted miRNAs - ", i, ".csv"), row.names = 1, header = T) 
+      neg <- rownames(neg)
+})
+names(venn_list) <- mycomparisons
+
+# NB there are no enriched miRNAs in any condition to load
+
+# T7 depleted miRNAs
+eulerplot1 <- plot(euler(venn_list[c("T0 vs T7_N", "T0 vs T7_H")], shape = "circle"),
+        quantities = list(type = "counts"),
+        main = "T7 - depleted miRNAs",
+        lty = 0, # No border
+        legend = list(labels = c("Normoxia", "Hypoxia"), fontsize = c(8,8)),
+        fill = c("olivedrab2", "deepskyblue"),
+        adjust = F) # Fill colours
+
+eulerplot1$children$main.grob$gp$cex <- 1.25 # Shrink title size
+
+png("Venn diagram - overlap of depleted miRNAs at T7.png", width = 100, height = 100, units = "mm", res = 360)
+eulerplot1
+dev.off()
+
+
+# T14 depleted miRNAs
+eulerplot1 <- plot(euler(venn_list[c("T0 vs T14_N", "T0 vs T14_H")], shape = "circle"),
+        quantities = list(type = "counts"),
+        main = "T14 - depleted miRNAs",
+        lty = 0, # No border
+        legend = list(labels = c("Normoxia", "Hypoxia"), fontsize = c(8,8)),
+        fill = c("olivedrab2", "deepskyblue"),
+        adjust = F) # Fill colours
+
+eulerplot1$children$main.grob$gp$cex <- 1.25 # Shrink title size
+
+png("Venn diagram - overlap of depleted miRNAs at T14.png", width = 100, height = 100, units = "mm", res = 360)
+eulerplot1
+dev.off()
+
+
+# Comparison of the log2 fold changes
+
+# Load depleted miRNAs and maintain the statistics
+dep_miRNAs <- lapply(names(results), function(i){
+      neg <- read.csv(file = paste0(gsub(" ", "", i), "/Depleted miRNAs - ", i, ".csv"), row.names = 1, header = T) 
+})
+names(dep_miRNAs) <- mycomparisons
+
+# Normoxia
+
+# Create a list of the miRNAs that are in common
+common_normoxia <- rownames(dep_miRNAs[["T0 vs T14_N"]][rownames(dep_miRNAs[["T0 vs T14_N"]]) %in% rownames(dep_miRNAs[["T0 vs T7_N"]]),])
+
+# Filter the dataframes to include only the "in common" results
+dep_miRNAs[["T0 vs T7_N"]] <- dep_miRNAs[["T0 vs T7_N"]][common_normoxia,]
+dep_miRNAs[["T0 vs T14_N"]] <- dep_miRNAs[["T0 vs T14_N"]][common_normoxia,]
+
+# Check rows are in the same order
+all(rownames(dep_miRNAs[["T0 vs T7_N"]]) == rownames(dep_miRNAs[["T0 vs T14_N"]]))
+
+# Check whether the log2 fold change at T7 is greater than (i.e. less selected) than at T14
+table(dep_miRNAs[["T0 vs T7_N"]]$neg.lfc > dep_miRNAs[["T0 vs T14_N"]]$neg.lfc) # 11 out of 12 miRNAs are more selected (lower log2 fold change) at T14, and the remaining one is almost the same between the two timepoints
+
+
+# Hypoxia
+
+# Create a list of the miRNAs that are in common
+common_hypoxia <- rownames(dep_miRNAs[["T0 vs T14_H"]][rownames(dep_miRNAs[["T0 vs T14_H"]]) %in% rownames(dep_miRNAs[["T0 vs T7_H"]]),])
+
+# Filter the dataframes to include only the "in common" results
+dep_miRNAs[["T0 vs T7_H"]] <- dep_miRNAs[["T0 vs T7_H"]][common_hypoxia,]
+dep_miRNAs[["T0 vs T14_H"]] <- dep_miRNAs[["T0 vs T14_H"]][common_hypoxia,]
+
+# Check rows are in the same order
+all(rownames(dep_miRNAs[["T0 vs T7_H"]]) == rownames(dep_miRNAs[["T0 vs T14_H"]]))
+
+# Check whether the log2 fold change at T7 is greater than (i.e. less selected) than at T14
+table(dep_miRNAs[["T0 vs T7_H"]]$neg.lfc > dep_miRNAs[["T0 vs T14_H"]]$neg.lfc) # 15 out of 17 miRNAs are more selected (lower log2 fold change) at T14, and of the remaining one has an almost identical log2 fold change	
+
+```
+
+# Venn diagrams showing the overlap in different conditions
+
+```{r}
+
+# Normoxia depleted miRNAs
+eulerplot1 <- plot(euler(venn_list[c("T0 vs T7_N", "T0 vs T14_N")], shape = "circle"),
+        quantities = list(type = "counts"),
+        main = "Normoxia - depleted miRNAs",
+        lty = 0, # No border
+        legend = list(labels = c("T7", "T14"), fontsize = c(8,8)),
+        fill = c("olivedrab2", "deepskyblue"),
+        adjust = F) # Fill colours
+
+eulerplot1$children$main.grob$gp$cex <- 1.25 # Shrink title size
+
+png("Venn diagram - overlap of depleted miRNAs in normoxia.png", width = 100, height = 100, units = "mm", res = 360)
+eulerplot1
+dev.off()
+
+
+# Hypoxia depleted miRNAs
+eulerplot1 <-       plot(euler(venn_list[c("T0 vs T7_H", "T0 vs T14_H")], shape = "circle"),
+        quantities = list(type = "counts"),
+        main = "Hypoxia - depleted miRNAs",
+        lty = 0, # No border
+        legend = list(labels = c("T7", "T14"), fontsize = c(8,8)),
+        fill = c("olivedrab2", "deepskyblue"),
+        adjust = F) # Fill colours
+
+eulerplot1$children$main.grob$gp$cex <- 1.25 # Shrink title size
+
+png("Venn diagram - overlap of depleted miRNAs in hypoxia.png", width = 100, height = 100, units = "mm", res = 360)
+eulerplot1
+dev.off()
+
+```
+
+# Overlap of significant genes in T14 normoxia and T14 hypoxia (i.e. universally essential miRNAs)
+
+```{r}
+
+# Load depleted miRNAs and keep only those with a log2 fold change < -1
+depleted_miRNAs <- lapply(names(results), function(i){
+      neg <- read.csv(file = paste0(gsub(" ", "", i), "/Depleted miRNAs - ", i, ".csv"), row.names = 1, header = T)
+      neg <- neg[neg$neg.lfc <= -1,]
+})
+names(depleted_miRNAs) <- mycomparisons
+
+
+# miRNAs significant and with log2 fold change < -1 at T14 in both normoxia and hypoxia
+universally_essential_14 <- intersect(rownames(depleted_miRNAs[["T0 vs T14_N"]]), rownames(depleted_miRNAs[["T0 vs T14_H"]]))
+
+write.csv(universally_essential_14, "Intersect T0 vs T14 Normoxia and Hypoxia - log2fc below -1.csv")
+
+
+# miRNAs significant and with log2 fold change < -1 at T7 and T14 in both normoxia and hypoxia
+universally_essential_7_14 <- intersect(rownames(depleted_miRNAs[["T0 vs T7_N"]]), intersect(rownames(depleted_miRNAs[["T0 vs T7_H"]]), intersect(rownames(depleted_miRNAs[["T0 vs T14_N"]]), rownames(depleted_miRNAs[["T0 vs T14_H"]]))))
+
+write.csv(universally_essential_7_14, "Intersect T0 vs T7 and T14 Normoxia and Hypoxia - log2fc below -1.csv")
+
+```
+
+# Generate volcano plots displaying significant miRNAs with the labels of universally essenital genes only (i.e. those with an FDR < 0.05 and log2 fold change < -1 at T7 and T14)
+
+```{r}
+
+# Generate volcano plots highlighting the significant genes
+volcano_plots <-
+  lapply(names(results), function(i){
+      x <- results[[i]]
+      EnhancedVolcano(x,
+        lab = x$miRNA,
+        x = "neg|lfc",
+        y = "fdr",
+        xlab = expression("Log"[2]*" Fold Change"),
+        ylab = expression("-Log"[10]*" FDR"),
+        title = gsub("_N", " Normoxia", gsub("_H", " Hypoxia", i)),
+        titleLabSize = 14,
+        pCutoff = fdr,
+        FCcutoff = 1,
+        pointSize = 2.5,
+        labSize = 4,
+        drawConnectors = T,
+        arrowheads = F,
+        max.overlaps = Inf,
+        min.segment.length = 1,
+        col = c("grey60", "grey60", "grey60", "red2"),
+        gridlines.minor = FALSE,
+        cutoffLineWidth = 0.5,
+        legendPosition = "none",
+        caption = NULL,
+        subtitle = NULL,
+        selectLab = substring(universally_essential_7_14, 5)
+        )+
+      coord_cartesian(xlim = c(-round(max(abs(x$`neg|lfc`)), 1),
+                               round(max(abs(x$`neg|lfc`)), 1)),
+                      ylim = c(0, max(-log10(x$fdr), na.rm = TRUE) + 3))+
+      scale_y_continuous(expand = c(0, 0))+
+      theme(
+      axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+      axis.title.x = element_text(colour = "black", size = 12),
+      axis.title.y = element_text(colour = "black", size = 12),
+      axis.text.y = element_text(color = "black", size = 10),
+      axis.text.x = element_text(color = "black", size = 10),
+      plot.title = element_text(hjust = 0.5))
+    ggsave(filename = paste0(gsub(" ", "", i), "/Volcano plot - universally essential genes ", i, ".png"), plot = last_plot())
+    last_plot()
+})
+
+ggsave("Volcano plots - universally essential genes.png", 
+       marrangeGrob(grobs = volcano_plots, 
+                    ncol = 2, 
+                    nrow = 3, 
+                    layout_matrix = matrix(1:6, 3, 2, TRUE), 
+                    top = NULL), 
+       device = "png", 
+       width = 210, 
+       height = 297, 
+       units = "mm")
+
+```
+
+# Generate a table of miRNAs which are significant in any of the T0 comparisons, and show which of comparisons they are relevant to
+
+```{r}
+
+# Load all depleted miRNAs
+depleted_miRNAs2 <- lapply(names(results), function(i){
+      neg <- read.csv(file = paste0(gsub(" ", "", i), "/Depleted miRNAs - ", i, ".csv"), row.names = 1, header = T)
+})
+names(depleted_miRNAs2) <- mycomparisons
+
+# Extract the names of all relevant miRNAs and remove duplicates
+depleted_miRNA_list <- lapply(names(depleted_miRNAs2[1:4]), function(i){
+      x <- depleted_miRNAs2[[i]]
+      miRNAs <- rownames(x)
+      miRNAs
+})
+depleted_miRNA_list <- unique(unlist(depleted_miRNA_list)) # These are the row names
+
+miRNA_table <- data.frame(row.names = depleted_miRNA_list,
+                          "T0 vs T7_N" = depleted_miRNAs2[["T0 vs T7_N"]][depleted_miRNA_list,]$neg.lfc < -1,             
+                          "T0 vs T7_H" = depleted_miRNAs2[["T0 vs T7_H"]][depleted_miRNA_list,]$neg.lfc < -1,
+                          "T0 vs T14_N" = depleted_miRNAs2[["T0 vs T14_N"]][depleted_miRNA_list,]$neg.lfc < -1,
+                          "T0 vs T14_H" = depleted_miRNAs2[["T0 vs T14_H"]][depleted_miRNA_list,]$neg.lfc < -1)
+
+miRNA_table[miRNA_table == TRUE] <- "**"
+miRNA_table[miRNA_table == FALSE] <- "*"
+miRNA_table[is.na(miRNA_table)] <- "-"
+
+write.csv(miRNA_table, "All signicant genes by comparison.csv")
+
+# Repeat for FDR 0.1
+
+# Load all depleted miRNAs
+depleted_miRNAs3 <- lapply(names(results), function(i){
+      neg <- read.csv(file = paste0(gsub(" ", "", i), "/Depleted miRNAs (fdr01) - ", i, ".csv"), row.names = 1, header = T)
+})
+names(depleted_miRNAs3) <- mycomparisons
+
+# Extract the names of all relevant miRNAs and remove duplicates
+depleted_miRNA_list2 <- lapply(names(depleted_miRNAs3[1:4]), function(i){
+      x <- depleted_miRNAs3[[i]]
+      miRNAs <- rownames(x)
+      miRNAs
+})
+depleted_miRNA_list2 <- unique(unlist(depleted_miRNA_list2)) # These are the row names
+
+miRNA_table2 <- data.frame(row.names = depleted_miRNA_list2,
+                          "T0 vs T7_N" = depleted_miRNAs3[["T0 vs T7_N"]][depleted_miRNA_list2,]$neg.lfc < -1,             
+                          "T0 vs T7_H" = depleted_miRNAs3[["T0 vs T7_H"]][depleted_miRNA_list2,]$neg.lfc < -1,
+                          "T0 vs T14_N" = depleted_miRNAs3[["T0 vs T14_N"]][depleted_miRNA_list2,]$neg.lfc < -1,
+                          "T0 vs T14_H" = depleted_miRNAs3[["T0 vs T14_H"]][depleted_miRNA_list2,]$neg.lfc < -1)
+
+miRNA_table2[miRNA_table2 == TRUE] <- "**"
+miRNA_table2[miRNA_table2 == FALSE] <- "*"
+miRNA_table2[is.na(miRNA_table2)] <- "-"
+
+write.csv(miRNA_table2, "All signicant genes by comparison (fdr01) .csv")
+
+```
+
+# Dotplot guide by guide counts - miRNAs of interest (and miR-210)
+
+```{r}
+
+# Create a vector of all miRNAs of interest (in this case, the miRNAs which are significant and have a <-1 log2 fold change at T14 in normoxia and hypoxia)
+
+miRNAs_of_interest <- row.names(miRNA_table[miRNA_table$T0.vs.T14_H == "**" & miRNA_table$T0.vs.T14_N == "**",])
+
+miRNAs_of_interest <- c(miRNAs_of_interest, "hsa-mir-210") # Include miR-210
+
+# Import the guide file containing the guide IDs and the miRNA that they target
+guide_names <- read.csv("C:/Users/fhartley/Documents/Project/CRISPR miRNA/6 - Analysis/cluster/pLX-miR_guides_curated.csv", row.names = 1, header = F)
+
+# Check that the rows are in the same order
+all(rownames(norm_counts) == rownames(guide_names))
+
+# Add a new column to the normalised guide counts file which denotes the miRNA that is targeted by each guide
+norm_counts_miRNA <- norm_counts
+norm_counts_miRNA$miRNA <- guide_names$V3
+norm_counts_miRNA$guideID <- row.names(norm_counts_miRNA)
+
+
+# Melt the dataframe
+norm_counts_miRNA_melt <- melt(norm_counts_miRNA, id.vars = c("miRNA", "guideID"))
+
+
+# Pool the replicates by removing the "_Rep" element
+norm_counts_miRNA_melt$variable <- substring(as.character(norm_counts_miRNA_melt$variable), 1, nchar(as.character(norm_counts_miRNA_melt$variable)) - 5)
+
+
+# Factor the conditions so they are displayed in the correct order
+norm_counts_miRNA_melt$variable <- factor(norm_counts_miRNA_melt$variable, levels = c("T0", "T7_N", "T7_H", "T14_N", "T14_H"))
+
+
+# For each miRNA, generate a plot containing all samples, and plots with the normoxia and hypoxia conditions individually
+
+# To scale the dotsize...
+max_y_range <- max(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA %in% miRNAs_of_interest,]$value) - min(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA %in% miRNAs_of_interest,]$value)
+
+# Generate the plots
+lapply(miRNAs_of_interest, function(i){
+# All samples
+ggplot(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,],
+       aes(x = variable, 
+           y = value, 
+           fill = guideID))+
+  geom_dotplot(binaxis = "y", 
+               binwidth = 1,
+               stackdir = "center",
+               dotsize = ((max(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,]$value) - min(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,]$value))/max_y_range)*100,
+               position = position_dodge(0.25))+
+  scale_x_discrete(limits = c("T0", "T7_N", "T7_H", "T14_N", "T14_H"),
+                   labels = c("T0" = "T0", 
+                              "T7_N" = "T7 Normoxia", 
+                              "T7_H" = "T7 Hypoxia", 
+                              "T14_N" = "T14 Normoxia",
+                              "T14_H" = "T14 Hypoxia"))+
+  scale_y_continuous(expand = c(0, (max(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,]$value)/50)))+
+  ylab("Normalised Counts")+
+  xlab("")+
+  theme(panel.border = element_blank(),
+        axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_line(color = "transparent"),
+        plot.background = element_rect(fill ="transparent", color = NA),
+        axis.title.x = element_text(colour = "black", size = 12),
+        axis.title.y = element_text(colour = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 10),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = i)
+ggsave(paste0("Guide by guide - ", i, " (all).png"), device = "png", width = 160, height = 150, units = "mm")
+
+# Normoxia
+N <- ggplot(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,],
+       aes(x = variable, 
+           y = value, 
+           fill = guideID))+
+  geom_dotplot(binaxis = "y", 
+               binwidth = 1,
+               stackdir = "center",
+               dotsize = ((max(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,]$value) - min(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,]$value))/max_y_range)*100,
+               position = position_dodge(0.25))+
+  scale_x_discrete(limits = c("T0", "T7_N", "T14_N"),
+                   labels = c("T0" = "T0", 
+                              "T7_N" = "T7 Normoxia",
+                              "T14_N" = "T14 Normoxia"))+
+  scale_y_continuous(expand = c(0, (max(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,]$value)/50)))+
+  ylab("Normalised Counts")+
+  xlab("")+
+  theme(panel.border = element_blank(),
+        axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_line(color = "transparent"),
+        plot.background = element_rect(fill ="transparent", color = NA),
+        axis.title.x = element_text(colour = "black", size = 12),
+        axis.title.y = element_text(colour = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 10),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = i)
+
+# Hypoxia
+H <- ggplot(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,],
+       aes(x = variable, 
+           y = value, 
+           fill = guideID))+
+  geom_dotplot(binaxis = "y", 
+               binwidth = 1,
+               stackdir = "center",
+               dotsize = ((max(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,]$value) - min(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,]$value))/max_y_range)*100,
+               position = position_dodge(0.25))+
+  scale_x_discrete(limits = c("T0", "T7_H", "T14_H"),
+                   labels = c("T0" = "T0", 
+                              "T7_H" = "T7 Hypoxia",
+                              "T14_H" = "T14 Hypoxia"))+
+  scale_y_continuous(expand = c(0, (max(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,]$value)/50)))+
+  ylab("Normalised Counts")+
+  xlab("")+
+  theme(panel.border = element_blank(),
+        axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_line(color = "transparent"),
+        plot.background = element_rect(fill ="transparent", color = NA),
+        axis.title.x = element_text(colour = "black", size = 12),
+        axis.title.y = element_text(colour = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 10),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = i)
+
+
+  ggsave(paste0("Guide by guide - ", i, " (N and H).png"), 
+       marrangeGrob(grobs = list(N, H), 
+                    ncol = 2, 
+                    nrow = 1, 
+                    top = NULL), 
+       device = "png", 
+       width = 200, 
+       height = 150, 
+       units = "mm",
+       bg = "transparent")
+})
+
+```
+
+# Lineplot guide by guide counts - miRNAs of interest (and miR-210)
+
+```{r}
+
+# Create a vector of all miRNAs of interest
+miRNAs_of_interest <- row.names(miRNA_table)
+miRNAs_of_interest <- c(miRNAs_of_interest, "hsa-mir-210") # Include miR-210
+
+
+# Create a copy of the normalised counts file, and convert the values to relative abundance
+norm_counts_miRNA <- norm_counts
+norm_counts_miRNA[,1:5] <- norm_counts_miRNA[,1:5]/norm_counts_miRNA[,1]
+norm_counts_miRNA[,6:10] <- norm_counts_miRNA[,6:10]/norm_counts_miRNA[,6]
+norm_counts_miRNA[11:15] <- norm_counts_miRNA[,11:15]/norm_counts_miRNA[,11]
+
+
+# Duplicate the T0 columns to make separate columns for normoxia and hypoxia
+colnames(norm_counts_miRNA) <- gsub("T0", "T0_N", colnames(norm_counts_miRNA))
+temp <- norm_counts_miRNA[,grep("T0", colnames(norm_counts_miRNA))]
+colnames(temp) <- gsub("_N", "_H", colnames(temp))
+norm_counts_miRNA <- cbind(norm_counts_miRNA, temp)
+rm(temp)
+
+
+# Import the guide file containing the guide IDs and the miRNA that they target
+guide_names <- read.csv("C:/Users/fhartley/Documents/Project/CRISPR miRNA/6 - Analysis/cluster/pLX-miR_guides_curated.csv", row.names = 1, header = F)
+
+
+# Check that the rows are in the same order
+all(rownames(norm_counts) == rownames(guide_names))
+
+
+# Add a new column to the normalised guide counts file which denotes the miRNA that is targeted by each guide
+norm_counts_miRNA$miRNA <- guide_names$V3
+
+
+# Melt the dataframe
+norm_counts_miRNA_melt <- melt(norm_counts_miRNA, id.vars = c("miRNA"))
+
+
+# Pool the replicates by removing the "_Rep" element
+norm_counts_miRNA_melt$variable <- substring(as.character(norm_counts_miRNA_melt$variable), 1, nchar(as.character(norm_counts_miRNA_melt$variable)) - 5)
+
+
+# Add a "Time" column which contains the day number
+norm_counts_miRNA_melt$Time <- norm_counts_miRNA_melt$variable
+norm_counts_miRNA_melt$Time <- gsub("T", "", norm_counts_miRNA_melt$Time)
+norm_counts_miRNA_melt$Time <- gsub("_N", "", norm_counts_miRNA_melt$Time)
+norm_counts_miRNA_melt$Time <- gsub("_H", "", norm_counts_miRNA_melt$Time)
+norm_counts_miRNA_melt$Time <- as.numeric(norm_counts_miRNA_melt$Time)
+
+
+# Add a "Condition" column for normoxia and hypoxia
+norm_counts_miRNA_melt$Condition <- norm_counts_miRNA_melt$variable
+norm_counts_miRNA_melt$Condition <- gsub("T0_", "", norm_counts_miRNA_melt$Condition)
+norm_counts_miRNA_melt$Condition <- gsub("T7_", "", norm_counts_miRNA_melt$Condition)
+norm_counts_miRNA_melt$Condition <- gsub("T14_", "", norm_counts_miRNA_melt$Condition)
+norm_counts_miRNA_melt$Condition <- gsub("N", "Normoxia", norm_counts_miRNA_melt$Condition)
+norm_counts_miRNA_melt$Condition <- gsub("H", "Hypoxia", norm_counts_miRNA_melt$Condition)
+norm_counts_miRNA_melt$Condition <- factor(norm_counts_miRNA_melt$Condition, levels = c("Normoxia", "Hypoxia"))
+
+
+# For each miRNA, generate a plot displaying the relative guide abundance over time, including error bars showing one standard deviation
+lapply(miRNAs_of_interest, function(i){
+  ggplot(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,],
+         aes(x = Time, 
+             y = value,
+             colour = Condition))+
+  geom_point(size = 2)+
+  stat_summary(aes(y = value, group = Condition), 
+               fun = mean, 
+               geom = "line",
+               size = 1)+
+  #stat_summary(fun.data = "mean_sdl",
+   #            fun.args = list(mult = 1),
+    #           geom = "errorbar", 
+     #          size = 1, 
+      #         width = 1,
+       #        position = position_dodge(0.2))+
+  ylab("Relative guide abundance")+
+  xlab("Day")+
+  scale_y_continuous(breaks = c(0, 0.5, 1))+
+  expand_limits(y=0)+
+  scale_x_continuous(breaks = c(0, 7, 14))+
+  theme(panel.border = element_blank(),
+        axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_line(color = "transparent"),
+        plot.background = element_rect(fill ="transparent", color = NA),
+        axis.title.x = element_text(colour = "black", size = 12),
+        axis.title.y = element_text(colour = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 10),
+        legend.background = element_rect(fill = "transparent"),
+        legend.title = element_blank(),
+        legend.key = element_rect(fill = "transparent", colour = "transparent"),
+        legend.text = element_text(size = 10, colour = "black"),
+        legend.position = c(0.2, 0.1),
+        plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = i)
+ggsave(paste0("Guide by guide - ", i, ".png"), device = "tiff", width = 100, height = 150, units = "mm")
+})
+
+
+### Additional guides for fdr 0.1
+
+miRNAs_of_interest_fdr <- c("hsa-mir-6734", "hsa-mir-1286", "hsa-mir-6880", "hsa-mir-663b")
+
+lapply(miRNAs_of_interest_fdr, function(i){
+  ggplot(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,],
+         aes(x = Time, 
+             y = value,
+             colour = Condition))+
+  #geom_point(size = 2)+
+  stat_summary(aes(y = value, group = Condition), 
+               fun = mean, 
+               geom = "line",
+               size = 1)+
+  stat_summary(fun.data = "mean_sdl",
+               fun.args = list(mult = 1),
+               geom = "errorbar", 
+               size = 1, 
+               width = 1,
+               position = position_dodge(0.2))+
+  ylab("Relative guide abundance")+
+  xlab("Day")+
+  scale_y_continuous(breaks = c(0, 0.5, 1))+
+  expand_limits(y=0)+
+  scale_x_continuous(breaks = c(0, 7, 14))+
+  theme(panel.border = element_blank(),
+        axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_line(color = "transparent"),
+        plot.background = element_rect(fill ="transparent", color = NA),
+        axis.title.x = element_text(colour = "black", size = 12),
+        axis.title.y = element_text(colour = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 10),
+        legend.background = element_rect(fill = "transparent"),
+        legend.title = element_blank(),
+        legend.key = element_rect(fill = "transparent", colour = "transparent"),
+        legend.text = element_text(size = 10, colour = "black"),
+        legend.position = c(0.2, 0.1),
+        plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = i)
+ggsave(paste0("Guide by guide - ", i, ".tiff"), device = "tiff", width = 100, height = 150, units = "mm", dpi = 720)
+})
+
+```
+
+# Combination of dots and line
+
+```{r}
+
+# Create a vector of all miRNAs of interest
+miRNAs_of_interest <- row.names(miRNA_table)
+miRNAs_of_interest <- c(miRNAs_of_interest, "hsa-mir-210") # Include miR-210
+
+
+# Import the guide file containing the guide IDs and the miRNA that they target
+guide_names <- read.csv("C:/Users/fhartley/Documents/Project/CRISPR miRNA/6 - Analysis/cluster/pLX-miR_guides_curated.csv", row.names = 1, header = F)
+
+
+# Create a copy of the normalised counts file, and convert the values to relative abundance
+norm_counts_miRNA <- norm_counts
+norm_counts_miRNA[,1:5] <- norm_counts_miRNA[,1:5]/norm_counts_miRNA[,1]
+norm_counts_miRNA[,6:10] <- norm_counts_miRNA[,6:10]/norm_counts_miRNA[,6]
+norm_counts_miRNA[11:15] <- norm_counts_miRNA[,11:15]/norm_counts_miRNA[,11]
+
+
+# Duplicate the T0 columns to make separate columns for normoxia and hypoxia
+colnames(norm_counts_miRNA) <- gsub("T0", "T0_N", colnames(norm_counts_miRNA))
+temp <- norm_counts_miRNA[,grep("T0", colnames(norm_counts_miRNA))]
+colnames(temp) <- gsub("_N", "_H", colnames(temp))
+norm_counts_miRNA <- cbind(norm_counts_miRNA, temp)
+rm(temp)
+
+
+# Check that the rows are in the same order
+all(rownames(norm_counts) == rownames(guide_names))
+
+# Add a new column to the normalised guide counts file which denotes the miRNA that is targeted by each guide
+norm_counts_miRNA$miRNA <- guide_names$V3
+norm_counts_miRNA$guideID <- row.names(norm_counts_miRNA)
+
+
+# Melt the dataframe
+norm_counts_miRNA_melt <- melt(norm_counts_miRNA, id.vars = c("miRNA", "guideID"))
+
+
+# Pool the replicates by removing the "_Rep" element
+norm_counts_miRNA_melt$variable <- substring(as.character(norm_counts_miRNA_melt$variable), 1, nchar(as.character(norm_counts_miRNA_melt$variable)) - 5)
+
+
+# Add a "Time" column which contains the day number
+norm_counts_miRNA_melt$Time <- norm_counts_miRNA_melt$variable
+norm_counts_miRNA_melt$Time <- gsub("T", "", norm_counts_miRNA_melt$Time)
+norm_counts_miRNA_melt$Time <- gsub("_N", "", norm_counts_miRNA_melt$Time)
+norm_counts_miRNA_melt$Time <- gsub("_H", "", norm_counts_miRNA_melt$Time)
+norm_counts_miRNA_melt$Time <- as.numeric(norm_counts_miRNA_melt$Time)
+
+
+# Add a "Condition" column for normoxia and hypoxia
+norm_counts_miRNA_melt$Condition <- norm_counts_miRNA_melt$variable
+norm_counts_miRNA_melt$Condition <- gsub("T0_", "", norm_counts_miRNA_melt$Condition)
+norm_counts_miRNA_melt$Condition <- gsub("T7_", "", norm_counts_miRNA_melt$Condition)
+norm_counts_miRNA_melt$Condition <- gsub("T14_", "", norm_counts_miRNA_melt$Condition)
+norm_counts_miRNA_melt$Condition <- gsub("N", "Normoxia", norm_counts_miRNA_melt$Condition)
+norm_counts_miRNA_melt$Condition <- gsub("H", "Hypoxia", norm_counts_miRNA_melt$Condition)
+norm_counts_miRNA_melt$Condition <- factor(norm_counts_miRNA_melt$Condition, levels = c("Normoxia", "Hypoxia"))
+
+
+#########################
+
+norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,] norm_counts_miRNA_melt[norm_counts_miRNA_melt$variable == "T7_H" | norm_counts_miRNA_melt$variable == "T14_H",]
+
+# Generate the plots - not right!!!
+lapply(miRNAs_of_interest, function(i){
+# Normoxia
+norm_counts_miRNA_melt_N <- norm_counts_miRNA_melt[norm_counts_miRNA_melt$Condition == "Normoxia",]
+norm_counts_miRNA_melt_N <- norm_counts_miRNA_melt_N[norm_counts_miRNA_melt_N$miRNA == i,]
+ggplot(norm_counts_miRNA_melt_N,
+       aes(x = Time, 
+           y = value, 
+           colour = guideID))+
+  geom_point(data = norm_counts_miRNA_melt_N[norm_counts_miRNA_melt_N$variable == "T7_H" | norm_counts_miRNA_melt_N$variable == "T14_H",])+
+  stat_summary(aes(y = value, group = Condition), 
+               fun = mean, 
+               geom = "line",
+               size = 1,
+               colour = "grey38")+
+  ylab("Relative guide abundance")+
+  xlab("Day")+
+  scale_y_continuous(breaks = c(0, 0.5, 1, 1.5, 2))+
+  #expand_limits(y=0)+
+  scale_x_continuous(breaks = c(0, 7, 14))+
+  theme(panel.border = element_blank(),
+        axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_line(color = "transparent"),
+        plot.background = element_rect(fill ="transparent", color = NA),
+        axis.title.x = element_text(colour = "black", size = 12),
+        axis.title.y = element_text(colour = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 10),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = i)
+ggsave(paste0("Guide by guide - ", i, " (normoxia).png"), device = "png", width = 160, height = 150, units = "mm")
+# Hypoxia
+norm_counts_miRNA_melt_H <- norm_counts_miRNA_melt[norm_counts_miRNA_melt$Condition == "Hypoxia",]
+ggplot(norm_counts_miRNA_melt_H[norm_counts_miRNA_melt_H$miRNA == i,],
+       aes(x = Time, 
+           y = value, 
+           colour = guideID))+
+  geom_point()+
+  stat_summary(aes(y = value, group = Condition), 
+               fun = mean, 
+               geom = "line",
+               size = 1,
+               colour = "grey38")+
+  ylab("Relative guide abundance")+
+  xlab("Day")+
+  scale_y_continuous(breaks = c(0, 0.5, 1, 1.5, 2))+
+  #expand_limits(y=0)+
+  scale_x_continuous(breaks = c(0, 7, 14))+
+  theme(panel.border = element_blank(),
+        axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_line(color = "transparent"),
+        plot.background = element_rect(fill ="transparent", color = NA),
+        axis.title.x = element_text(colour = "black", size = 12),
+        axis.title.y = element_text(colour = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 10),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = i)
+ggsave(paste0("Guide by guide - ", i, " (hypoxia).png"), device = "png", width = 160, height = 150, units = "mm")
+})
+
+
+```
+
+# Expression of miRNAs of interest in a publically available dataset of MDA-MB-231 cells
+
+```{r}
+# Import the counts data
+public <- read.csv("C:/Users/fhartley/Documents/Project/CRISPR miRNA/6 - Analysis/Publically_available.csv", header = T, row.names = 1)
+
+
+# Change the "miR" string in the row names so they match my results
+rownames(public) <- str_replace(rownames(public), "miR", "mir")
+
+
+# Keep only the rows containing relevant miRNAs (including -3p and -5p)
+public <- public[grep(paste(rownames(miRNA_table), collapse="|"), rownames(public)),]
+
+
+# Melt the data frame for ggplot
+public_t <- t(public)
+public_melted <- melt(public_t, id.vars = colnames(public_t))
+
+
+# Make a dotplot showing which miRNAs are expressed in this dataset. Order by expression level. miRNAs below the red line have zero expression
+ggplot(public_melted, aes(x = reorder(Var2, value), y = value)) + 
+    geom_dotplot(binaxis = "y", 
+                 binwidth = 1,
+                 stackdir = "center",
+                 dotsize = 10)+
+    coord_flip()+
+    labs(x = NULL,
+         y = "Counts")+
+    scale_y_continuous(expand = c(0, 10))+
+    theme(panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid = element_blank(),
+          panel.grid.major.y = element_line(colour = "lightgrey", linetype = 3),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          axis.title.x = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black"),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5))+
+    geom_vline(xintercept = nrow(public) - nrow(public[rowSums(public) > 0,]) + 0.6, 
+               linetype = "dashed", colour = "red")
+ggsave("Expression of miRNAs of interest in public datatset.png",  device = "png", width = 210, height = 297, units = "mm")
+
+
+# FOR POSTER - remove the zero expressing miRNAs
+ggplot(public_melted, aes(x = reorder(Var2, value), y = value)) + 
+    geom_dotplot(binaxis = "y", 
+                 binwidth = 1,
+                 stackdir = "center",
+                 dotsize = 10,
+                 fill = "deepskyblue")+
+    coord_flip()+
+    labs(x = NULL,
+         y = "Counts")+
+    scale_y_continuous(expand = c(0, 10))+
+    xlim("hsa-mir-199a-3p",
+         "hsa-mir-1306-3p",
+         "hsa-mir-130b-5p",
+         "hsa-mir-877-5p",
+         "hsa-mir-1306-5p",
+         "hsa-mir-151a-5p",
+         "hsa-mir-320a-3p",
+         "hsa-mir-769-5p",
+         "hsa-mir-151a-3p")+
+    theme(panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid = element_blank(),
+          panel.grid.major.y = element_line(colour = "lightgrey", linetype = 3),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          axis.title.x = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black"),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5, face = "bold"))+
+    ggtitle("MDA-MB-231 cells")
+ggsave("POSTER - Expression of miRNAs of interest in public datatset.tiff",  device = "tiff", width = 210, height = 75, units = "mm", dpi = 720)
+
+
+
+# Do again but include fdr 0.1 miRNAs
+public <- public[grep(paste(rownames(miRNA_table2), collapse="|"), rownames(public)),]
+
+
+# Melt the data frame for ggplot
+public_t <- t(public)
+public_melted <- melt(public_t, id.vars = colnames(public_t))
+
+
+# Make a dotplot showing which miRNAs are expressed in this dataset. Order by expression level. miRNAs below the red line have zero expression
+ggplot(public_melted, aes(x = reorder(Var2, value), y = value)) + 
+    geom_dotplot(binaxis = "y", 
+                 binwidth = 1,
+                 stackdir = "center",
+                 dotsize = 10)+
+    coord_flip()+
+    labs(x = NULL,
+         y = "Counts")+
+    scale_y_continuous(expand = c(0, 10))+
+    theme(panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid = element_blank(),
+          panel.grid.major.y = element_line(colour = "lightgrey", linetype = 3),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          axis.title.x = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black"),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5))+
+    geom_vline(xintercept = nrow(public) - nrow(public[rowSums(public) > 0,]) + 0.6, 
+               linetype = "dashed", colour = "red")
+ggsave("Expression of miRNAs of interest in public datatset (fdr01).png",  device = "png", width = 210, height = 297, units = "mm")
+
+
+
+```
+
+# Expression of miRNAs of interest in my MDA-MB-231 dataset 
+###### DO THIS WHEN DATA ARRIVES
+
+```{r}
+
+# TBD
+
+```
+
+# Expression of miRNAs of interest in TCGA breast cancer samples (normal and tumour)
+##### should i also do this TNBC specific?
+
+```{r}
+
+# Download the miRNA expression data for breast cancer and store in Documents
+
+query <- GDCquery(project = "TCGA-BRCA", data.category = "Transcriptome Profiling", data.type = "miRNA Expression Quantification", legacy = F, experimental.strategy = "miRNA-Seq")
+
+#GDCdownload(query = query, directory = "C:/Users/fhartley/Documents/GDC/")
+
+BRCA <- GDCprepare(query, directory = "C:/Users/fhartley/Documents/GDC/")
+
+
+# Make the miRNA the rownames, and retain only the reads per million data
+rownames(BRCA) <- BRCA$miRNA_ID
+BRCA <- BRCA[,grep("reads_per_million", colnames(BRCA))]
+colnames(BRCA) <- substr(colnames(BRCA), 32, nchar(colnames(BRCA)))
+
+
+# Import the barcode information and extract breast cancer samples
+patient_cancer_type <- PanCancerAtlas_subtypes()
+patient_cancer_type <- data.frame(patient_cancer_type[patient_cancer_type$cancer.type == "BRCA", c(1:3)])
+
+
+# Trim the barcodes
+colnames(BRCA) <- substr(colnames(BRCA), 1, 15)
+patient_cancer_type$shortened_barcodes <- substr(patient_cancer_type$pan.samplesID, 1, 15)
+
+
+# Check that most samples are represented in both the patient information and the miRNA expression table, and retain only samples present in both
+table(colnames(BRCA) %in% patient_cancer_type$shortened_barcodes)
+BRCA <- BRCA[, colnames(BRCA) %in% patient_cancer_type$shortened_barcodes]
+patient_cancer_type <- patient_cancer_type[patient_cancer_type$shortened_barcodes %in% colnames(BRCA),]
+BRCA <- BRCA[, colnames(BRCA) %in% patient_cancer_type$shortened_barcodes]
+table(colnames(BRCA) %in% patient_cancer_type$shortened_barcodes)
+
+
+# Keep only miRNAs that are relevant 
+BRCA <- BRCA[grep(paste(rownames(miRNA_table), collapse="|"), rownames(BRCA)),]
+
+
+# Split the data into primary tumour and normal tissue
+BRCA_CA <- as.data.frame(BRCA[,grepl("(01$|02$|03$|04$|05$|08$|09$)", colnames(BRCA))])
+BRCA_NT <- as.data.frame(BRCA[,grepl("(11$)", colnames(BRCA))])
+
+
+# Melt the dataframe for use in ggplot
+BRCA_CA_t <- t(BRCA_CA)
+BRCA_CA_melted <- melt(melt(BRCA_CA_t, id.vars = colnames(BRCA_CA_t))) 
+
+
+# Display the expression level of the miRNAs of interest in the breast cancer data set. Outliers are removed from the plot which reduces the horizontal axis. Red line indicates miRNAs which have a median count >= to 10 across the samples
+ggplot(BRCA_CA_melted, aes(x = reorder(Var2, value), y = value)) + 
+    geom_boxplot(fill = "lightgrey", outlier.shape = NA)+
+    coord_flip()+
+    labs(x = NULL,
+         y = "Reads per million")+
+    scale_y_continuous(expand = c(0, 100), limits = c(0, 10100))+
+    theme(panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid = element_blank(),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          axis.title.x = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black"),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5))+
+    geom_vline(xintercept = nrow(BRCA_CA) - nrow(BRCA_CA[rowMedians(as.matrix(BRCA_CA)) >= 10, ]) + 0.5, 
+               linetype = "dashed", colour = "red")
+ggsave("Expression of miRNAs of interest in TCGA Breast Cancer.png",  device = "png", width = 210, height = 297, units = "mm")
+
+
+# Present the same plot for normal tissue
+BRCA_NT_t <- t(BRCA_NT)
+BRCA_NT_melted <- melt(melt(BRCA_NT_t, id.vars = colnames(BRCA_NT_t))) 
+
+
+# Display the expression level of the miRNAs of interest in the breast cancer data set. Outliers are removed from the plot which reduces the horizontal axis. Red line indicates miRNAs which have a median count >= to 10 across the samples
+ggplot(BRCA_NT_melted, aes(x = reorder(Var2, value), y = value)) + 
+    geom_boxplot(fill = "lightgrey", outlier.shape = NA)+
+    coord_flip()+
+    labs(x = NULL,
+         y = "Reads per million")+
+    scale_y_continuous(expand = c(0, 100), limits = c(0, 10100))+
+    theme(panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid = element_blank(),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          axis.title.x = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black"),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5))+
+    geom_vline(xintercept = nrow(BRCA_NT) - nrow(BRCA_NT[rowMedians(as.matrix(BRCA_NT)) >= 10, ]) + 0.5, 
+               linetype = "dashed", colour = "red")
+ggsave("Expression of miRNAs of interest in TCGA Normal Breast Tissue.png",  device = "png", width = 210, height = 297, units = "mm")
+
+
+# Present the same plot for the TNBC (basal) subtype only
+BRCA_TNBC <- BRCA_CA[, colnames(BRCA_CA) %in% patient_cancer_type[patient_cancer_type$Subtype_mRNA == "Basal",]$shortened_barcodes]
+BRCA_TNBC_t <- t(BRCA_TNBC)
+BRCA_TNBC_melted <- melt(melt(BRCA_TNBC_t, id.vars = colnames(BRCA_TNBC_t))) 
+
+
+# Display the expression level of the miRNAs of interest in TNBC. Outliers are removed from the plot which reduces the horizontal axis. Red line indicates miRNAs which have a median count >= to 10 across the samples
+ggplot(BRCA_TNBC_melted, aes(x = reorder(Var2, value), y = value)) + 
+    geom_boxplot(fill = "lightgrey", outlier.shape = NA)+
+    coord_flip()+
+    labs(x = NULL,
+         y = "Reads per million")+
+    scale_y_continuous(expand = c(0, 100), limits = c(0, 10100))+
+    theme(panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid = element_blank(),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          axis.title.x = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black"),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5))+
+    geom_vline(xintercept = nrow(BRCA_TNBC) - nrow(BRCA_TNBC[rowMedians(as.matrix(BRCA_TNBC)) >= 10, ]) + 0.5, 
+               linetype = "dashed", colour = "red")
+ggsave("Expression of miRNAs of interest in TNBC.png",  device = "png", width = 210, height = 297, units = "mm")
+
+
+# FOR POSTER - remove the low expressing miRNAs for BRCA
+ggplot(BRCA_CA_melted, aes(x = reorder(Var2, value), y = value)) + 
+    geom_boxplot(fill = "deepskyblue", outlier.shape = NA)+
+    coord_flip()+
+    labs(x = NULL,
+         y = "Reads per million")+
+    scale_y_continuous(expand = c(0, 100), limits = c(0, 10100))+
+    xlim("hsa-mir-130b",
+         "hsa-mir-769",
+         "hsa-mir-320a",
+         "hsa-mir-199a-1",
+         "hsa-mir-151a",
+         "hsa-mir-199a-2")+
+    theme(panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid = element_blank(),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          axis.title.x = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black"),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5, face = "bold"))+
+    ggtitle("Breast Cancer")
+ggsave("POSTER - Expression of miRNAs of interest in TCGA Breast Cancer.tiff",  device = "tiff", width = 210, height = 75, units = "mm", dpi = 720)
+
+
+# For fdr 0.1
+# Keep only miRNAs that are relevant 
+BRCA <- BRCA[grep(paste(rownames(miRNA_table2), collapse="|"), rownames(BRCA)),]
+
+
+# Split the data into primary tumour and normal tissue
+BRCA_CA <- as.data.frame(BRCA[,grepl("(01$|02$|03$|04$|05$|08$|09$)", colnames(BRCA))])
+BRCA_NT <- as.data.frame(BRCA[,grepl("(11$)", colnames(BRCA))])
+
+
+# Melt the dataframe for use in ggplot
+BRCA_CA_t <- t(BRCA_CA)
+BRCA_CA_melted <- melt(melt(BRCA_CA_t, id.vars = colnames(BRCA_CA_t))) 
+
+
+# Display the expression level of the miRNAs of interest in the breast cancer data set. Outliers are removed from the plot which reduces the horizontal axis. Red line indicates miRNAs which have a median count >= to 10 across the samples
+ggplot(BRCA_CA_melted, aes(x = reorder(Var2, value), y = value)) + 
+    geom_boxplot(fill = "lightgrey", outlier.shape = NA)+
+    coord_flip()+
+    labs(x = NULL,
+         y = "Reads per million")+
+    scale_y_continuous(expand = c(0, 100), limits = c(0, 10100))+
+    theme(panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid = element_blank(),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          axis.title.x = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black"),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5))+
+    geom_vline(xintercept = nrow(BRCA_CA) - nrow(BRCA_CA[rowMedians(as.matrix(BRCA_CA)) >= 10, ]) + 0.5, 
+               linetype = "dashed", colour = "red")
+ggsave("Expression of miRNAs of interest in TCGA Breast Cancer (fdr01).png",  device = "png", width = 210, height = 297, units = "mm")
+
+
+```
+
+# Expression of miRNAs of interest in Helen's MDA-MB-231 exosome data (all conditions included - Normoxia/Hypoxia, HIF WT/KO)
+
+```{r}
+
+# Import the exosome counts
+exosome <- read.csv("C:/Users/fhartley/Documents/Helen/P220049_counts.csv", header = T, row.names = 1)
+
+
+# Change the "miR" string in the row names so they match my results
+rownames(exosome) <- str_replace(rownames(exosome), "miR", "mir")
+
+
+# Keep only the rows containing relevant miRNAs (including -3p and -5p)
+exosome <- exosome[grep(paste(rownames(miRNA_table), collapse="|"), rownames(exosome)),]
+
+
+# Melt the data frame for ggplot
+exosome_t <- t(exosome)
+exosome_melted <- melt(exosome_t, id.vars = colnames(exosome_t))
+
+
+# Make a dotplot showing which miRNAs are expressed in this dataset. Order by expression level. Outliers are hidden which shortens the x axis from 30,000 to 10,000.
+ggplot(exosome_melted, aes(x = reorder(Var2, value), y = value)) + 
+    geom_boxplot(outlier.shape = NA, fill = "lightgrey")+
+    coord_flip()+
+    labs(x = NULL,
+         y = "Counts")+
+    scale_y_continuous(expand = c(0, 100), limits = c(0, 10100))+
+    theme(panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid = element_blank(),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          axis.title.x = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black"),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5))
+ggsave("Expression of miRNAs of interest in Helen's exosome datatset.png",  device = "png", width = 210, height = 297, units = "mm")
+
+```
+
+# Differential expression in Helen's dataset
+##### DO I NEED THIS?
+
+```{r}
+# Import the results from Helen's exosomal data
+res1 <- read.csv("C:/Users/fhartley/Documents/Helen/Results - Hypoxia_vs_Normoxia (KnockOut).csv")
+res2 <- read.csv("C:/Users/fhartley/Documents/Helen/Results - Hypoxia_vs_Normoxia (WildType).csv")
+res3 <- read.csv("C:/Users/fhartley/Documents/Helen/Results - KnockOut_vs_WildType (Hypoxia).csv")
+res4 <- read.csv("C:/Users/fhartley/Documents/Helen/Results - KnockOut_vs_WildType (Normoxia).csv")
+
+# Compile into a list
+exosome_results <- list(res1, res2, res3, res4)
+names(exosome_results) <- c("Hypoxia_vs_Normoxia (KnockOut)", "Hypoxia_vs_Normoxia (WildType)", "KnockOut_vs_WildType (Hypoxia)", "KnockOut_vs_WildType (Normoxia)")
+
+
+# Edit the miRNA names so they can be filtered using my results list, then filter
+exosome_results2 <- lapply(names(exosome_results), function(i){
+  x <- exosome_results[[i]]
+  x$X <- str_remove(x$X, "-3p")
+  x$X <- str_remove(x$X, "-5p")
+  x$X <- str_replace(x$X, "miR", "mir")
+  x <- x[x$X %in% rownames(miRNA_table),]
+  })
+names(exosome_results2) <- c("Hypoxia_vs_Normoxia (KnockOut)", "Hypoxia_vs_Normoxia (WildType)", "KnockOut_vs_WildType (Hypoxia)", "KnockOut_vs_WildType (Normoxia)")
+
+
+# Filter the results so that only miRNAs which are essential in my data, and differentially expressed in Helen's data remain
+exosome_results_differential <- lapply(names(exosome_results2), function(i){
+  x <- exosome_results2[[i]]
+  x <- x[!is.na(x$padj),]
+  x <- x[x$padj <= 0.2,]
+  })
+names(exosome_results_differential) <- c("Hypoxia_vs_Normoxia (KnockOut)", "Hypoxia_vs_Normoxia (WildType)", "KnockOut_vs_WildType (Hypoxia)", "KnockOut_vs_WildType (Normoxia)")
+
+
+# Filter the results so that only miRNAs which are essential in my data, and highly expressed in Helen's data remain (exosomes only so not necessarily indicative of general expression)
+exosome_results_expressed <- lapply(names(exosome_results2), function(i){
+  x <- exosome_results2[[i]]
+  x <- x[x$baseMean >=25,]
+  })
+names(exosome_results_expressed) <- c("Hypoxia_vs_Normoxia (KnockOut)", "Hypoxia_vs_Normoxia (WildType)", "KnockOut_vs_WildType (Hypoxia)", "KnockOut_vs_WildType (Normoxia)")
+exosome_results_expressed[[1]]$X
+
+```
+
+# Predicted targets for the top miRNA results
+
+```{r}
+
+# Identify the top miRNA results. These are results which are significant in at least one comparison (i.e. present in miRNA table) and also expressed in either the publically available dataset, or the TCGA dataset (above red lines in the plots)
+public_expressed <- rownames(public[rowSums(public) > 0,])
+public_expressed <- str_remove(public_expressed, "-3p")
+public_expressed <- str_remove(public_expressed, "-5p")
+public_expressed <- unique(public_expressed)
+
+BRCA_expressed <- rownames(BRCA_CA[rowMedians(as.matrix(BRCA_CA)) >= 10, ])
+BRCA_expressed <- str_remove(BRCA_expressed, "-1$")
+BRCA_expressed <- str_remove(BRCA_expressed, "-2$")
+BRCA_expressed <- unique(BRCA_expressed)
+
+top_res <- unique(c(public_expressed, BRCA_expressed))
+write.csv(top_res, "Top miRNA results (significant and expressed).csv")
+
+# Import the predicted targets for these miRNAs (min_src can be adjusted, but min_src 3 was selected as some of the miRNAs didn't have results at min_src 4)
+targets <- list()
+for(i in top_res){
+  targets[[i]] <- read.csv(paste0(root_directory, "miRNA Targets/min_src_3/", i, " targets.csv"))
+}
+
+# Produce a table containing the top 20 predicted targets for each miRNA.
+targets <- lapply(names(targets), function(i){
+  x <- targets[[i]]
+  if(nrow(x) > 20){
+    x <- x[1:20,]
+  }
+  rownames(x) <- x$GeneSymbol
+  x <- x[,c(11, 10, 8, 2:6)]
+})
+names(targets) <- top_res
+
+
+# Export the tables to the miRNA targets folder
+lapply(names(targets), function(i){
+  x <- targets[[i]]
+  write.csv(x, paste0(root_directory, "/miRNA Targets/Predicted targets - ", i, ".csv"))
+})
+
+
+```
+
+# Over-enrichment analysis on the top 20 predicted targets 
+
+```{r}
+
+# Identify the top miRNA results. These are results which are significant in at least one comparison (i.e. present in miRNA table) and also expressed in either the publically available dataset, or the TCGA dataset (above red lines in the plots)
+public_expressed <- rownames(public[rowSums(public) > 0,])
+public_expressed <- str_remove(public_expressed, "-3p")
+public_expressed <- str_remove(public_expressed, "-5p")
+public_expressed <- unique(public_expressed)
+
+BRCA_expressed <- rownames(BRCA_CA[rowMedians(as.matrix(BRCA_CA)) >= 10, ])
+BRCA_expressed <- str_remove(BRCA_expressed, "-1$")
+BRCA_expressed <- str_remove(BRCA_expressed, "-2$")
+BRCA_expressed <- unique(BRCA_expressed)
+
+top_res <- unique(c(public_expressed, BRCA_expressed))
+
+# Import the predicted targets for these miRNAs (min_src can be adjusted, but min_src 3 was selected as some of the miRNAs didn't have results at min_src 4)
+targets <- list()
+for(i in top_res){
+  targets[[i]] <- read.csv(paste0(root_directory, "miRNA Targets/min_src_3/", i, " targets.csv"))
+  targets[[i]] <- targets[[i]][1:20,]
+}
+
+# Set up the Hallmarks in msigdbr
+msigdbr_df <- msigdbr(species = "human", category = "H")
+msigdbr_t2g = msigdbr_df %>% dplyr::distinct(gs_name, entrez_gene) %>% as.data.frame()
+
+
+# Run over-enrichment analysis on the top 20 predicted targets using gene ontology terms, KEGG terms, and the hallmarks of cancer
+lapply(names(targets), function(i){
+  x <- targets[[i]]
+  # Gene Ontology
+  ora_go_BP <- enrichGO(gene = x$X, 
+                        keyType = "ENTREZID", 
+                        universe = NULL, 
+                        OrgDb = org.Hs.eg.db, 
+                        ont = "BP", 
+                        pAdjustMethod = "BH", 
+                        pvalueCutoff  = 1, 
+                        qvalueCutoff  = 1, 
+                        readable = T)
+  ora_go_BP <- as.data.frame(ora_go_BP@result)
+  ora_go_BP <- ora_go_BP[ora_go_BP$p.adjust <= 0.1,]
+  if(nrow(ora_go_BP) > 0){write.csv(ora_go_BP, paste0(root_directory, "/miRNA Targets/Over-enrichment Analysis - ", i, " (GO).csv"))}
+
+  # KEGG
+  ora_kegg <- enrichKEGG(gene = x$X, 
+                         organism = "hsa", 
+                         universe = NULL, 
+                         pAdjustMethod = "BH", 
+                         pvalueCutoff = 1, 
+                         qvalueCutoff = 1, 
+                         minGSSize = 10, 
+                         maxGSSize = 500)
+  ora_kegg <- setReadable(ora_kegg, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+  ora_kegg <- as.data.frame(ora_kegg@result)
+  ora_kegg <- ora_kegg[ora_kegg$p.adjust <= 0.1,]
+  if(nrow(ora_kegg) > 0){write.csv(ora_kegg, paste0(root_directory, "/miRNA Targets/Over-enrichment Analysis - ", i, " (KEGG).csv"))}
+  
+  # Hallmarks
+  ora_msig <- enricher(gene = x$X, 
+                       TERM2GENE = msigdbr_t2g, 
+                       universe = NULL, 
+                       pAdjustMethod = "BH", 
+                       pvalueCutoff  = 1, 
+                       qvalueCutoff  = 1, 
+                       minGSSize = 10, 
+                       maxGSSize = 500)
+  ora_msig <- setReadable(ora_msig, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+  ora_msig <- as.data.frame(ora_msig@result)
+  ora_msig <- ora_msig[ora_msig$p.adjust <= 0.1,]
+  if(nrow(ora_msig) > 0){write.csv(ora_msig, paste0(root_directory, "/miRNA Targets/Over-enrichment Analysis - ", i, " (MSIG).csv"))}
+})
+
+```
+
+# Hypoxia specific results
+
+```{r}
+
+# List the miRNAs which are significant hits at T14 hypoxia, but not T14 normoxia.
+
+miRNAs_of_interest_hypoxia <- venn_list$`T0 vs T14_H`[!venn_list$`T0 vs T14_H` %in% venn_list$`T0 vs T14_N`]
+
+miRNAs_of_interest_hypoxia <- c(miRNAs_of_interest_hypoxia, "hsa-mir-3127")
+
+lapply(miRNAs_of_interest_hypoxia, function(i){
+  ggplot(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,],
+         aes(x = Time, 
+             y = value,
+             colour = Condition))+
+  #geom_point(size = 2)+
+  stat_summary(aes(y = value, group = Condition), 
+               fun = mean, 
+               geom = "line",
+               size = 1)+
+  stat_summary(fun.data = "mean_sdl",
+               fun.args = list(mult = 1),
+               geom = "errorbar", 
+               size = 1, 
+               width = 1,
+               position = position_dodge(0.2))+
+  ylab("Relative guide abundance")+
+  xlab("Day")+
+  scale_y_continuous(breaks = c(0, 0.5, 1))+
+  expand_limits(y=0)+
+  scale_x_continuous(breaks = c(0, 7, 14))+
+  theme(panel.border = element_blank(),
+        axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_line(color = "transparent"),
+        plot.background = element_rect(fill ="transparent", color = NA),
+        axis.title.x = element_text(colour = "black", size = 12),
+        axis.title.y = element_text(colour = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 10),
+        legend.background = element_rect(fill = "transparent"),
+        legend.title = element_blank(),
+        legend.key = element_rect(fill = "transparent", colour = "transparent"),
+        legend.text = element_text(size = 10, colour = "black"),
+        legend.position = c(0.2, 0.1),
+        plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = i)
+ggsave(paste0("Guide by guide hypoxia - ", i, ".png"), device = "png", width = 100, height = 150, units = "mm")
+})
+
+# FOR POSTER
+miRNAs_of_interest_hypoxia_poster <- "hsa-mir-6777"
+
+lapply(miRNAs_of_interest_hypoxia_poster, function(i){
+  ggplot(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,],
+         aes(x = Time, 
+             y = value,
+             colour = Condition))+
+  #geom_point(size = 2)+
+  stat_summary(aes(y = value, group = Condition), 
+               fun = mean, 
+               geom = "line",
+               size = 1)+
+  stat_summary(fun.data = "mean_sdl",
+               fun.args = list(mult = 1),
+               geom = "errorbar", 
+               size = 1, 
+               width = 1,
+               position = position_dodge(0.2))+
+  ylab("Relative guide abundance")+
+  xlab("Day")+
+  scale_y_continuous(breaks = c(0, 0.5, 1))+
+  expand_limits(y=0)+
+  scale_x_continuous(breaks = c(0, 7, 14))+
+  theme(panel.border = element_blank(),
+        axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_line(color = "transparent"),
+        plot.background = element_rect(fill ="transparent", color = NA),
+        axis.title.x = element_text(colour = "black", size = 12),
+        axis.title.y = element_text(colour = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 10),
+        legend.background = element_rect(fill = "transparent"),
+        legend.title = element_blank(),
+        legend.key = element_rect(fill = "transparent", colour = "transparent"),
+        legend.text = element_text(size = 10, colour = "black"),
+        legend.position = c(0.2, 0.1),
+        plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = i)
+ggsave(paste0("POSTER - Guide by guide - ", i, ".tiff"), device = "tiff", width = 100, height = 150, units = "mm", dpi = 720)
+})
+
+# STAT3 relevant miRNAs
+miRNAs_of_interest_STAT3 <- c("hsa-mir-1299", "hsa-mir-3127")
+
+lapply(miRNAs_of_interest_STAT3, function(i){
+  ggplot(norm_counts_miRNA_melt[norm_counts_miRNA_melt$miRNA == i,],
+         aes(x = Time, 
+             y = value,
+             colour = Condition))+
+  #geom_point(size = 2)+
+  stat_summary(aes(y = value, group = Condition), 
+               fun = mean, 
+               geom = "line",
+               size = 1)+
+  stat_summary(fun.data = "mean_sdl",
+               fun.args = list(mult = 1),
+               geom = "errorbar", 
+               size = 1, 
+               width = 1,
+               position = position_dodge(0.2))+
+  ylab("Relative guide abundance")+
+  xlab("Day")+
+  scale_y_continuous(breaks = c(0, 0.5, 1))+
+  expand_limits(y=0)+
+  scale_x_continuous(breaks = c(0, 7, 14))+
+  theme(panel.border = element_blank(),
+        axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_line(color = "transparent"),
+        plot.background = element_rect(fill ="transparent", color = NA),
+        axis.title.x = element_text(colour = "black", size = 12),
+        axis.title.y = element_text(colour = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 10),
+        legend.background = element_rect(fill = "transparent"),
+        legend.title = element_blank(),
+        legend.key = element_rect(fill = "transparent", colour = "transparent"),
+        legend.text = element_text(size = 10, colour = "black"),
+        legend.position = c(0.2, 0.1),
+        plot.title = element_text(hjust = 0.5))+
+    ggtitle(label = i)
+ggsave(paste0("POSTER - Guide by guide - ", i, ".tiff"), device = "tiff", width = 100, height = 150, units = "mm", dpi = 720)
+})
+
+
+# Check the expression of the above miRNAs
+
+miRNAs2 <- c(miRNAs_of_interest_STAT3, "hsa-mir-6777")
+
+# Import the counts data
+public <- read.csv("C:/Users/fhartley/Documents/Project/CRISPR miRNA/6 - Analysis/Publically_available.csv", header = T, row.names = 1)
+
+
+# Change the "miR" string in the row names so they match my results
+rownames(public) <- str_replace(rownames(public), "miR", "mir")
+
+
+# Keep only the rows containing relevant miRNAs (including -3p and -5p)
+public <- public[grep(paste(miRNAs2, collapse="|"), rownames(public)),]
+
+
+# Melt the data frame for ggplot
+public_t <- t(public)
+public_melted <- melt(public_t, id.vars = colnames(public_t))
+
+
+# Make a dotplot showing which miRNAs are expressed in this dataset. Order by expression level. miRNAs below the red line have zero expression
+ggplot(public_melted, aes(x = reorder(Var2, value), y = value)) + 
+    geom_dotplot(binaxis = "y", 
+                 binwidth = 1,
+                 stackdir = "center",
+                 dotsize = 10)+
+    coord_flip()+
+    labs(x = NULL,
+         y = "Counts")+
+    scale_y_continuous(expand = c(0, 10))+
+    theme(panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid = element_blank(),
+          panel.grid.major.y = element_line(colour = "lightgrey", linetype = 3),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          axis.title.x = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black"),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5))#+
+    #geom_vline(xintercept = nrow(public) - nrow(public[rowSums(public) > 0,]) + 0.6, 
+              # linetype = "dashed", colour = "red")
+ggsave("HYPOXIA - Expression of miRNAs of interest in public datatset.png",  device = "png", width = 210, height = 100, units = "mm")
+
+
+query <- GDCquery(project = "TCGA-BRCA", data.category = "Transcriptome Profiling", data.type = "miRNA Expression Quantification", legacy = F, experimental.strategy = "miRNA-Seq")
+
+#GDCdownload(query = query, directory = "C:/Users/fhartley/Documents/GDC/")
+
+BRCA <- GDCprepare(query, directory = "C:/Users/fhartley/Documents/GDC/")
+
+
+# Make the miRNA the rownames, and retain only the reads per million data
+rownames(BRCA) <- BRCA$miRNA_ID
+BRCA <- BRCA[,grep("reads_per_million", colnames(BRCA))]
+colnames(BRCA) <- substr(colnames(BRCA), 32, nchar(colnames(BRCA)))
+
+
+# Import the barcode information and extract breast cancer samples
+patient_cancer_type <- PanCancerAtlas_subtypes()
+patient_cancer_type <- data.frame(patient_cancer_type[patient_cancer_type$cancer.type == "BRCA", c(1:3)])
+
+
+# Trim the barcodes
+colnames(BRCA) <- substr(colnames(BRCA), 1, 15)
+patient_cancer_type$shortened_barcodes <- substr(patient_cancer_type$pan.samplesID, 1, 15)
+
+
+# Check that most samples are represented in both the patient information and the miRNA expression table, and retain only samples present in both
+table(colnames(BRCA) %in% patient_cancer_type$shortened_barcodes)
+BRCA <- BRCA[, colnames(BRCA) %in% patient_cancer_type$shortened_barcodes]
+patient_cancer_type <- patient_cancer_type[patient_cancer_type$shortened_barcodes %in% colnames(BRCA),]
+BRCA <- BRCA[, colnames(BRCA) %in% patient_cancer_type$shortened_barcodes]
+table(colnames(BRCA) %in% patient_cancer_type$shortened_barcodes)
+
+
+# Keep only miRNAs that are relevant 
+BRCA <- BRCA[grep(paste(miRNAs2, collapse="|"), rownames(BRCA)),]
+
+
+# Split the data into primary tumour and normal tissue
+BRCA_CA <- as.data.frame(BRCA[,grepl("(01$|02$|03$|04$|05$|08$|09$)", colnames(BRCA))])
+BRCA_NT <- as.data.frame(BRCA[,grepl("(11$)", colnames(BRCA))])
+
+
+# Melt the dataframe for use in ggplot
+BRCA_CA_t <- t(BRCA_CA)
+BRCA_CA_melted <- melt(melt(BRCA_CA_t, id.vars = colnames(BRCA_CA_t))) 
+
+
+# Display the expression level of the miRNAs of interest in the breast cancer data set. Outliers are removed from the plot which reduces the horizontal axis. Red line indicates miRNAs which have a median count >= to 10 across the samples
+ggplot(BRCA_CA_melted, aes(x = reorder(Var2, value), y = value)) + 
+    geom_boxplot(fill = "lightgrey", outlier.shape = NA)+
+    coord_flip()+
+    labs(x = NULL,
+         y = "Reads per million")+
+    #scale_y_continuous(expand = c(0, 100), limits = c(0, 10100))+
+    theme(panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid = element_blank(),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          axis.title.x = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black"),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5))
+#ggsave("Expression of miRNAs of interest in TCGA Breast Cancer.png",  device = "png", width = 210, height = 297, units = "mm")
+
+
+# Present the same plot for normal tissue
+BRCA_NT_t <- t(BRCA_NT)
+BRCA_NT_melted <- melt(melt(BRCA_NT_t, id.vars = colnames(BRCA_NT_t))) 
+
+
+# Display the expression level of the miRNAs of interest in the breast cancer data set. Outliers are removed from the plot which reduces the horizontal axis. Red line indicates miRNAs which have a median count >= to 10 across the samples
+ggplot(BRCA_NT_melted, aes(x = reorder(Var2, value), y = value)) + 
+    geom_boxplot(fill = "lightgrey", outlier.shape = NA)+
+    coord_flip()+
+    labs(x = NULL,
+         y = "Reads per million")+
+    #scale_y_continuous(expand = c(0, 100), limits = c(0, 10100))+
+    theme(panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid = element_blank(),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          axis.title.x = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black"),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5))
+#ggsave("Expression of miRNAs of interest in TCGA Normal Breast Tissue.png",  device = "png", width = 210, height = 297, units = "mm")
+
+
+# Present the same plot for the TNBC (basal) subtype only
+BRCA_TNBC <- BRCA_CA[, colnames(BRCA_CA) %in% patient_cancer_type[patient_cancer_type$Subtype_mRNA == "Basal",]$shortened_barcodes]
+BRCA_TNBC_t <- t(BRCA_TNBC)
+BRCA_TNBC_melted <- melt(melt(BRCA_TNBC_t, id.vars = colnames(BRCA_TNBC_t))) 
+
+
+# Display the expression level of the miRNAs of interest in TNBC. Outliers are removed from the plot which reduces the horizontal axis. Red line indicates miRNAs which have a median count >= to 10 across the samples
+ggplot(BRCA_TNBC_melted, aes(x = reorder(Var2, value), y = value)) + 
+    geom_boxplot(fill = "lightgrey", outlier.shape = NA)+
+    coord_flip()+
+    labs(x = NULL,
+         y = "Reads per million")+
+    #scale_y_continuous(expand = c(0, 100), limits = c(0, 10100))+
+    theme(panel.border = element_blank(),
+          axis.line.x = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(size = 0.5, linetype = "solid", colour = "black"),
+          panel.background = element_rect(fill = "transparent"),
+          panel.grid = element_blank(),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          axis.title.x = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black"),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5))
+
+rowSums(BRCA)
+
+```
+
+
+```{r}
+```
+
+```{r}
+```

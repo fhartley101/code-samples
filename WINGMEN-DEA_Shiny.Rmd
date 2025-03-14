@@ -1,0 +1,1525 @@
+---
+title: "WINGMEN DEA Shiny interactive plots"
+author: "Fiona Hartley"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+runtime: shiny
+output: 
+  html_document:
+    toc: true
+    toc_depth: 5
+    toc_float: true
+
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+
+```
+
+# Set variables
+
+```{r set_variables}
+
+# Alignment type
+alignment <- c("star", "salmon")[1]
+
+# Gene filtering
+gene_filtering <- c("all_genes", "protein-coding_genes")[2]
+
+# Sample filtering
+sample_filtering <- c("all_samples", "remove_outlier_samples", "remove_low_assignment",
+                      "high_responders", "high_immune", "low_immune", 
+                      "PTEN_positive", "PTEN_negative")[3]
+
+# Independent filtering
+ind_filtering <- c("independent_filtering", "no_independent_filtering")[1]
+
+# Significance cutoff
+padj.cutoff <- c(0.05, 0.1)[1]
+
+# Force execution
+force_execution <- c(TRUE, FALSE)[2]
+
+```
+
+# Set directories
+
+```{r set_directories}
+
+data_directory <- "C:/Users/fhartley/OneDrive - Nexus365/1 - Post Doc/WINGMEN/RNA-Seq All/data"
+res_directory <- paste("C:/Users/fhartley/OneDrive - Nexus365/1 - Post Doc/WINGMEN/RNA-Seq All/results", alignment, gene_filtering, sample_filtering, ind_filtering, sep = "/")
+
+```
+
+# Load packages
+
+```{r load_packages, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Differential gene expression
+library(DESeq2)
+
+# Annotation
+library(org.Hs.eg.db)
+
+# Graphics
+library(ggplot2)
+library(plotly)
+library(DT)
+library(EnhancedVolcano)
+library(pheatmap)
+library(ComplexHeatmap)
+library(circlize)
+library(smplot2)
+library(gridExtra)
+library(shiny)
+
+# Other
+library(dplyr)
+library(tidyverse)
+
+```
+
+# Load the DESeq2 object data.
+The DESeq2 object has already been created during QC.
+
+```{r load_ddsobj}
+
+# Read in the DESeq RDS file
+ddsobj <- readRDS(file = paste(res_directory, "ddsobj_filtered.rds", sep = "/"))
+
+```
+
+# Load the metadata file. 
+Variables have been factorised and assigned levels in the WINGMEN metadata Rmarkdown.
+
+```{r load_metadata}
+
+metadata <- readRDS(file = paste0(data_directory, "/metadata.rds"))
+metadata <- metadata[!is.na(metadata$Azenta.ID_full),]
+rownames(metadata) <- metadata$WINGMEN.sampleID
+
+```
+
+# Subset the metadata file so it only contains samples which are in the DESeq2 object
+
+```{r subset_metadata}
+
+if(all(rownames(ddsobj@colData) %in% rownames(metadata))){
+  metadata <- metadata[rownames(ddsobj@colData),]
+} else {
+  cat("ERROR - some samples present in counts do not have corresponding sample info in metadata")
+}
+
+```
+
+Check the design and assign to an object
+
+```{r design}
+
+ddsobj@design
+design <- as.formula(ddsobj@design)
+design_matrix <- stats::model.matrix(object = design, data = metadata)
+
+```
+
+# Run differential expression analysis.
+There are several steps are wrapped into a single function in DESeq2. Briefly, these are:
+
+1. The estimation of size factors (controlling for differences in the sequencing depth of the samples)
+2. The estimation of dispersion values for each gene
+3. Fitting a generalized linear model
+
+```{r run_DESeq2}
+
+if(file.exists(paste(res_directory, "dds.rds", sep = "/")) & force_execution == FALSE){
+  dds <- readRDS(paste(res_directory, "dds.rds", sep = "/"))
+} else {
+  dds <- DESeq(object  = ddsobj, 
+             test    = "Wald", 
+             fitType = "parametric", 
+             sfType  = "ratio", 
+             betaPrior = FALSE
+             )
+
+}
+
+```
+
+# Calculate the results
+Results tables are generated using the function results, which extracts a results table with log2 fold changes, p values and adjusted p values.
+
+```{r calculate_results}
+
+if(padj.cutoff == 0.05){
+  if(file.exists(paste(res_directory, "padj005", "res.rds", sep = "/")) & force_execution == FALSE){
+    res <- readRDS(paste(res_directory, "padj005", "res.rds", sep = "/"))
+    
+  } else {
+    
+      if(ind_filtering == "independent_filtering"){
+      res <- results(object = dds,
+                     contrast = c("Treatment", "POST", "PRE"),
+                     alpha = padj.cutoff,
+                     independentFiltering = T,
+                     )
+      }
+
+      if(ind_filtering == "no_independent_filtering"){
+      res <- results(object = dds, 
+                     contrast = c("Treatment", "POST", "PRE"),
+                     alpha = padj.cutoff,
+                     independentFiltering = F,
+                     )
+      }
+    
+  }
+}
+
+if(padj.cutoff == 0.1){
+  if(file.exists(paste(res_directory, "padj01", "res.rds", sep = "/")) & force_execution == FALSE){
+    res <- readRDS(paste(res_directory, "padj01", "res.rds", sep = "/"))
+  
+  } else {
+    
+      if(ind_filtering == "independent_filtering"){
+        res <- results(object = dds,
+                       contrast = c("Treatment", "POST", "PRE"),
+                       alpha = padj.cutoff,
+                       independentFiltering = T,
+                       )
+      }
+
+      if(ind_filtering == "no_independent_filtering"){
+        res <- results(object = dds, 
+                       contrast = c("Treatment", "POST", "PRE"),
+                       alpha = padj.cutoff,
+                       independentFiltering = F,
+                       )
+      }
+    
+  }
+}
+
+```
+
+# Extract the results table
+Extract the results table to be saved as a csv. Annotate the genes with their gene name, gene type, gene symbol and entrez ID.
+
+```{r extract_results, message=FALSE}
+
+# Create a dataframe and sort by adjusted p value
+res_all <- as.data.frame(subset(res))
+res_all <- arrange(res_all, padj)
+
+# Add annotations
+res_all$symbol<- mapIds(org.Hs.eg.db, 
+                        keys = rownames(res_all), 
+                        column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
+res_all$genename <- mapIds(org.Hs.eg.db, 
+                           keys = rownames(res_all), 
+                           column = "GENENAME", keytype = "ENSEMBL", multiVals = "first")
+res_all$genetype <- mapIds(org.Hs.eg.db, 
+                           keys = rownames(res_all), 
+                           column = "GENETYPE", keytype = "ENSEMBL", multiVals = "first")
+res_all$entrez <- mapIds(org.Hs.eg.db, 
+                         keys = rownames(res_all), 
+                         column = "ENTREZID", keytype = "ENSEMBL", multiVals = "first")
+
+
+```
+
+## Subset the results table so that only significant results remain
+
+```{r extract_sig_results}
+
+# Remove NA results
+res_sig <- res_all[!is.na(res_all$padj),]
+
+# Extract significant results
+res_sig <- res_sig[res_sig$padj <= padj.cutoff,]
+
+```
+
+# Create an interactive results table
+
+```{r interactive_table}
+
+dt <- res_sig[,c("symbol", "genename", "log2FoldChange", "pvalue", "padj", "baseMean")]
+
+# Round numerical values
+dt$pvalue <- round(x = dt$pvalue, digits = 6)
+dt$padj   <- round(x = dt$padj, digits = 4)
+dt$log2FoldChange <- round(x = dt$log2FoldChange, digits = 3)
+dt$baseMean<- round(x = dt$baseMean, digits = 0)
+
+# Plot
+DT::datatable(
+  data = dt,
+  rownames = FALSE,
+  filter = 'top',
+  extensions = 'Buttons', 
+  options  = list(
+    order = list(list(4, 'asc')),
+    dom = 'Blfrtip',
+    buttons = list(
+      'copy', 
+      list(
+        extend = 'collection',
+        buttons = c('csv', 'excel', 'pdf'),
+        text = 'Download'
+      ))
+  )
+)
+
+
+```
+
+# Volcano plots
+Volcano plots represent another useful way to visualise the results of differential expression analyses. Here we use EnhancedVolcano (Blighe, Rana, and Lewis 2018), an R package that produces publication-ready volcano plots.
+
+```{r volcano_plots}
+
+# Remove NA results
+res_all <- res_all[!is.na(res_all$padj),]
+
+# Create a volcano plot with pvalue on the y axis
+p1 <- EnhancedVolcano(res_all,
+        lab = res_all$symbol,
+        x = 'log2FoldChange',
+        y = 'pvalue',
+        xlab = expression("Log"[2]*" Fold Change"),
+        title = "Xentuzumab Treatment",
+        pCutoff = padj.cutoff,
+        FCcutoff = 1,
+        titleLabSize = 14,
+        pointSize = 2.5,
+        labSize = 4,
+        col = c("grey60", "grey60", "grey60", "red2"),
+        gridlines.minor = FALSE,
+        cutoffLineWidth = 0.5,
+        legendPosition = "none",
+        caption = NULL,
+        subtitle = NULL
+        #selectLab = c('ALDOC','CA9')
+        )+
+        ggplot2::coord_cartesian(xlim=c(-round(max(abs(res_all$log2FoldChange)),1),
+                                        round(max(abs(res_all$log2FoldChange)),1)),
+                                ylim = c(0, max(-log10(res_all$padj), na.rm = TRUE) + 3))+
+        scale_y_continuous(expand = c(0, 0))+
+        theme(
+          axis.line.x = element_line(linewidth = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(linewidth = 0.5, linetype = "solid", colour = "black"),
+          axis.title.x = element_text(colour = "black", size = 12),
+          axis.title.y = element_text(colour = "black", size = 12),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5))
+
+# Display the plot
+p1
+
+# Save the plot
+ggsave(filename = "Volcano plot pvalue.png",
+       path = if(padj.cutoff == 0.05){paste(res_directory, "padj005", sep = "/")} 
+              else if (padj.cutoff == 0.1){paste(res_directory, "padj01", sep = "/")},
+       plot = p1,
+       device = "png", 
+       width = 150, 
+       height = 100, 
+       units = "mm")
+
+# Create a volcano plot with the adjusted p value on the y axis
+p2 <- EnhancedVolcano(res_all,
+        lab = res_all$symbol,
+        x = 'log2FoldChange',
+        y = 'padj',
+        xlab = expression("Log"[2]*" Fold Change"),
+        ylab = expression("-Log"[10]*" FDR"),
+        title = "Xentuzumab Treatment",
+        pCutoff = padj.cutoff,
+        FCcutoff = 1,
+        titleLabSize = 14,
+        pointSize = 2.5,
+        labSize = 4,
+        col = c("grey60", "grey60", "grey60", "red2"),
+        gridlines.minor = FALSE,
+        cutoffLineWidth = 0.5,
+        legendPosition = "none",
+        caption = NULL,
+        subtitle = NULL
+        #selectLab = c('ALDOC','CA9')
+        )+
+        ggplot2::coord_cartesian(xlim=c(-round(max(abs(res_all$log2FoldChange)),1),
+                                        round(max(abs(res_all$log2FoldChange)),1)),
+                                 ylim = c(0, max(-log10(res_all$padj), na.rm = TRUE) + 3))+
+        scale_y_continuous(expand = c(0, 0))+
+        theme(
+          axis.line.x = element_line(linewidth = 0.5, linetype = "solid", colour = "black"),
+          axis.line.y = element_line(linewidth = 0.5, linetype = "solid", colour = "black"),
+          axis.title.x = element_text(colour = "black", size = 12),
+          axis.title.y = element_text(colour = "black", size = 12),
+          axis.text.y = element_text(color = "black", size = 10),
+          axis.text.x = element_text(color = "black", size = 10),
+          plot.title = element_text(hjust = 0.5))
+
+# Display the plot
+p2
+
+# Save the plot
+ggsave(filename = "Volcano plot padj.png",
+       path = if(padj.cutoff == 0.05){paste(res_directory, "padj005", sep = "/")} 
+              else if (padj.cutoff == 0.1){paste(res_directory, "padj01", sep = "/")},
+       plot = p2,
+       device = "png", 
+       width = 150, 
+       height = 100, 
+       units = "mm")
+
+```
+
+# Plot the counts of any gene of interest
+
+```{r plot_genes, message=FALSE, warning=FALSE, fig.width=4}
+
+# Extract counts
+dds.tmp <- DESeq2::counts(object = dds, normalized = TRUE)
+dds.tmp <- as.data.frame.table(t(dds.tmp))
+
+# Assign column names
+colnames(dds.tmp) <- c("WINGMEN.sampleID", "gene_id", "expr")
+
+# Merge
+dds.tmp <- merge(
+  x = dds.tmp,
+  y = metadata[,c("WINGMEN.sampleID", "Treatment", "WINGMEN.patientID")],
+  by = "WINGMEN.sampleID",
+  all.x = T
+)
+
+# Generate the interactive plots
+
+# Get gene names for the dropdown menu
+gene_choices <- setNames(rownames(res_all), res_all$symbol)
+
+# Define UI
+ui <- fluidPage(
+  titlePanel("Gene Expression Boxplot Viewer"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput(
+        "selected_gene",
+        "Select a Gene:",
+        choices = gene_choices,
+        selected = gene_choices[1],
+        multiple = FALSE,
+        selectize = TRUE
+      )
+    ),
+    mainPanel(
+      plotlyOutput("gene_plot")
+    )
+  )
+)
+
+# Define server
+server <- function(input, output) {
+  output$gene_plot <- renderPlotly({
+    req(input$selected_gene)
+    
+    # Get the selected gene ID
+    gene_id <- input$selected_gene
+    
+    # Filter data for the selected gene
+    plot_data <- dds.tmp[dds.tmp$gene_id == gene_id, ]
+    
+    # Generate the ggplot
+    p <- ggplot(plot_data, aes(Treatment, expr, fill = Treatment, text = WINGMEN.sampleID)) +
+      geom_boxplot() +
+      geom_point() +
+      ylab("Normalized Counts") +
+      theme(
+        legend.position = "none",
+        panel.border = element_blank(),
+        panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        axis.line.x = element_line(linewidth = 0.5, linetype = "solid", colour = "black"),
+        axis.line.y = element_line(linewidth = 0.5, linetype = "solid", colour = "black"),
+        axis.title.x = element_text(colour = "black", size = 12),
+        axis.title.y = element_text(colour = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 10),
+        plot.title = element_text(hjust = 0.5)
+      ) +
+      ggtitle(names(gene_choices[gene_choices == input$selected_gene]))
+    
+    # Add connecting lines for patient pairs
+    for (patient in metadata$WINGMEN.patientID[duplicated(metadata$WINGMEN.patientID)]) {
+      p <- p + geom_segment(
+        data = plot_data[plot_data$WINGMEN.patientID == patient, ],
+        aes(
+          x = as.numeric(Treatment[Treatment == "PRE"]),
+          y = expr[2],
+          xend = as.numeric(Treatment[Treatment == "POST"]),
+          yend = expr[1]
+        )
+      )
+    }
+    
+    # Make the plot interactive
+    ggplotly(p, tooltip = "text") %>%
+  layout(
+    annotations = list(
+      list(
+        text = paste("padj = ", as.character(signif(res_all[input$selected_gene,"padj"], 
+                                                    digits = 3))),
+        x = 0.5,       # Position of the subtitle (centered on x-axis)
+        y = 1,       # Position relative to the plot (above the title)
+        xref = "paper",
+        yref = "paper",
+        showarrow = FALSE,
+        font = list(size = 12, color = "black") # Subtitle style
+      )
+    )
+  )
+  })
+}
+
+# Run the application
+shinyApp(ui = ui, server = server)
+
+```
+
+# Visualise the differentially expressed genes in a heatmap
+
+First, create a list of variables to use in the heatmap annotations.
+
+```{r heatmap_annotations}
+
+# Select and name the metadata columns which can be used to annotate the heatmap
+selected_annotations2 <- c(WINGMEN_ID = "WINGMEN.ID_full", 
+                           WINGMEN_Sample_ID = "WINGMEN.sampleID",
+                           BMI = "BMI_cat", 
+                           Age = "Age",
+                           Tumour_Stage = "t_label2", 
+                           Gleason_Score = "Gleason_Score2",
+                           PTEN_Status = "PTEN",
+                           Total_Reads = "total_read_cat", 
+                           Uniquely_Mapped_Reads = "uniquely_mapped_cat", 
+                           Percentage_Uniquely_Mapped_Reads = "uniquely_mapped_percent_cat",
+                           Assigned_Reads = "Assigned_cat", 
+                           Percentage_Assigned_Reads = "percent_assigned_cat",
+                           Treatment = "Treatment", 
+                           Infusions = "Infusions",
+                           PSA = "PSA",
+                           Elevated_PSA = "PSA_elevated",
+                           Tumour_nuclear_pIGF1R = "pIGF1R_pc", 
+                           Tumour_nonnuclear_pIGF1R = "pIGF1R_nn_pc", 
+                           Whole_tissue_pIGF1R = "pIGF1R_whole_tissue_pc", 
+                           Whole_tissue_nuclear_pIGF1R = "pIGF1R_whole_n_tissue_pc", 
+                           Whole_tissue_nonnuclear_pIGF1R = "pIGF1R_whole_nn_tissue_pc",
+                           pS6 = "pS6_pc",
+                           Androgen_Receptor = "AR_pc",
+                           IGF1 = "IGF1", 
+                           IGF_Bioactivity = "serum_igf", 
+                           IGF1_mRNA = "IGF1_mRNA_STAR",
+                           FAP_mRNA = "FAP_mRNA_STAR", 
+                           CD8A_mRNA = "CD8A_mRNA_STAR", 
+                           CD8_IHC = "CD8_IHC", 
+                           CD8_Infiltration = "CD8_Infiltration", 
+                           CD8_Circulation = "CD8_Circulation"
+                           )
+
+```
+
+## Generate an interactive heatmap where you can toggle elements on and off using the rlog values
+
+```{r interactive_rlogheatmap}
+
+# Generate a colour function
+col_fun <- colorRamp2(c(-3, 0, 3), c("blue", "white", "red"))
+
+# Import the rlog file and extract to a data frame
+rlogcount <- readRDS(paste(res_directory, "rlogcount.rds", sep = "/"))
+rlogcount <- as.data.frame(assay(rlogcount))
+
+# Convert the rownames from ENSEMBL IDs to gene symbols. Remove any NA or duplicate gene symbols.
+rlogcount$symbol <- mapIds(org.Hs.eg.db, keys = rownames(rlogcount), 
+                           column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
+rlogcount <- rlogcount[!is.na(rlogcount$symbol),]
+rlogcount <- rlogcount[!duplicated(rlogcount$symbol),]
+rownames(rlogcount) <- rlogcount$symbol
+rlogcount <- rlogcount[,-ncol(rlogcount)]
+
+# Convert to a matrix
+rlogcount <- as.matrix(rlogcount)
+
+# Subset so only differentially expressed genes remain
+rlog_sig <- rlogcount[rownames(rlogcount) %in% res_sig$symbol,]
+
+# Scale the values to Z score
+rlog_sig_scaled <- t(scale(t(rlog_sig)))
+
+# Initialise the user interface
+ui <- fluidPage(
+  titlePanel("DEG Heatmap"),
+  sidebarLayout(
+    sidebarPanel(
+      checkboxGroupInput(
+        "Annotations",
+        "Select Annotations:",
+        choices = names(selected_annotations2),
+        selected = c("Treatment", "PSA", "Whole_tissue_pIGF1R", "pS6", "PTEN_Status")
+      )
+    ),
+    mainPanel(
+      plotOutput("DynamicHeatmap", height = "800px")
+    )
+  )
+)
+
+# Create the heatmap producing function
+server <- function(input, output, session) {
+  output$DynamicHeatmap <- renderPlot({
+
+    # Selected annotations
+    selected_annotations <- input$Annotations
+    annotation_list <- list()
+    for(i in selected_annotations){
+      annotation_list[[i]] <- metadata[,selected_annotations2[[i]]]
+    }
+
+    # Assign colour scales
+    my_col_list <- list(
+      BMI = 
+        c("Healthy" = "yellow", "Overweight" = "orange", "Obese" = "red"),
+      Age = 
+        colorRamp2(c(min(as.numeric(metadata$Age), na.rm = T),
+                     max(as.numeric(metadata$Age), na.rm = T)),
+                   c("white", "darkgray")),
+      Tumour_Stage = 
+        c("T2a" = "#ffa494", "T2b" = "#ff7961", "T2c" = "#ff6347",
+          "T3a" = "#ff4d2e", "T3b" = "#ff3814", "T3c" = "#fa2600"),
+      Gleason_Score = 
+        c("Gleason 7 (3+4)" = "#67e691", "Gleason 7 (4+3)" = "#50c878", 
+          "Gleason 8 (4+4)" = "#378a52",
+          "Gleason 9 (4+5)" = "#205c34", "Gleason 9 (5+4)" = "#154224"),
+      PTEN_Status =
+        c("+" = "yellow", "-" = "red"),
+      Total_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Uniquely_Mapped_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Percentage_Uniquely_Mapped_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Assigned_Reads =
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Percentage_Assigned_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Treatment = 
+        c("PRE" = "#f8766d", "POST" = "#619CFF"),
+      Infusions = 
+        c("4" = "#bae4b3", "5" = "#74c476", "6" = "#238b45", "7" = "#205c34"),
+      PSA = 
+        colorRamp2(c(min(metadata$PSA, na.rm = T),
+                     max(metadata$PSA, na.rm = T)), 
+                   c("white", "red")),
+      Elevated_PSA = 
+        c("Normal_PSA" = "yellow", "Elevated_PSA" = "red"),
+      Tumour_nuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_pc, na.rm = T),
+                     max(metadata$pIGF1R_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Tumour_nonnuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_nn_pc, na.rm = T),
+                     max(metadata$pIGF1R_nn_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Whole_tissue_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_tissue_pc, na.rm = T), 
+                     max(metadata$pIGF1R_whole_tissue_pc, na.rm = T)), 
+                   c("white", "magenta4")), 
+      Whole_tissue_nuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_n_tissue_pc, na.rm = T), 
+                     max(metadata$pIGF1R_whole_n_tissue_pc, na.rm = T)),
+                   c("white", "magenta4")), 
+      Whole_tissue_nonnuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_nn_tissue_pc, na.rm = T),
+                     max(metadata$pIGF1R_whole_nn_tissue_pc, na.rm = T)), 
+                   c("white", "magenta4")),
+      pS6 =
+        colorRamp2(c(min(metadata$pS6_pc, na.rm = T),
+                     max(metadata$pS6_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Androgen_Receptor =
+        colorRamp2(c(min(metadata$AR_pc, na.rm = T),
+                     max(metadata$AR_pc, na.rm = T)), 
+                   c("white", "red")),
+      IGF1 = 
+        colorRamp2(c(min(metadata$IGF1, na.rm = T),
+                     max(metadata$IGF1, na.rm = T)), 
+                   c("white", "magenta4")),
+      IGF_Bioactivity = 
+        colorRamp2(c(min(metadata$serum_igf, na.rm = T), 
+                     max(metadata$serum_igf, na.rm = T)), 
+                   c("white", "magenta4")),
+      IGF1_mRNA =
+        colorRamp2(c(min(metadata$IGF1_mRNA_STAR, na.rm = T),
+                        max(metadata$IGF1_mRNA_STAR, na.rm = T)),
+                      c("white", "magenta4")),
+      FAP_mRNA =
+        colorRamp2(c(min(metadata$FAP_mRNA_STAR, na.rm = T), 
+                       max(metadata$FAP_mRNA_STAR, na.rm = T)),
+                     c("white", "magenta4")),
+      CD8A_mRNA =
+        colorRamp2(c(min(metadata$CD8A_mRNA_STAR, na.rm = T),
+                       max(metadata$CD8A_mRNA_STAR, na.rm = T)),
+                     c("white", "magenta4")),
+      CD8_IHC = 
+        colorRamp2(c(min(metadata$CD8_IHC, na.rm = T), 
+                     max(metadata$CD8_IHC, na.rm = T)), 
+                   c("white", "red")),
+      CD8_Infiltration = 
+        colorRamp2(c(min(metadata$CD8_Infiltration, na.rm = T),
+                     max(metadata$CD8_Infiltration, na.rm = T)),
+                   c("white", "red")),
+      CD8_Circulation = 
+        colorRamp2(c(min(metadata$CD8_Circulation, na.rm = T),
+                     max(metadata$CD8_Circulation, na.rm = T)),
+                   c("white", "red"))
+      )
+    my_col_list <- my_col_list[names(annotation_list)]
+    
+    # Construct the annotation
+    ha <- HeatmapAnnotation(
+      df = annotation_list,
+      col = my_col_list,
+      na_col = "gray90"
+    )
+    
+    # Plot the heatmap
+    heatmap <- Heatmap(
+      rlog_sig_scaled,
+      heatmap_legend_param = list(title = "Z Score"),
+      height = unit(6, "in"),  
+      width = unit(4.55, "in"),
+      top_annotation = ha,
+      row_names_gp = gpar(fontsize = 8),
+      column_names_gp = gpar(fontsize = 8),
+      col = col_fun
+    )
+    
+    draw(heatmap, heatmap_legend_side = "bottom", 
+         annotation_legend_side = "bottom", 
+         merge_legends = TRUE)
+  })
+  
+  session$onSessionEnded(function() {
+    stopApp()
+  })
+  
+}
+
+shinyApp(ui, server, options = list(height = 1000))
+
+```
+
+## And agin splitting the PRE and POST samples into different heatmaps
+
+```{r interactive_rlogheatmap_split}
+
+# Generate a second heatmap where PRE and POST samples are separated
+mat1 <- rlog_sig_scaled[,grep("PRE", colnames(rlog_sig_scaled))]
+mat2 <- rlog_sig_scaled[,grep("POST", colnames(rlog_sig_scaled))]
+
+metadata_pre <- metadata[grep("PRE", rownames(metadata)),]
+metadata_post <- metadata[grep("POST", rownames(metadata)),]
+
+# Initialise the user interface
+ui <- fluidPage(
+  titlePanel("DEG Heatmap"),
+  sidebarLayout(
+    sidebarPanel(
+      checkboxGroupInput(
+        "Annotations",
+        "Select Annotations:",
+        choices = names(selected_annotations2),
+        selected = c("Treatment", "PSA", "Whole_tissue_pIGF1R", "pS6", "PTEN_Status")
+      )
+    ),
+    mainPanel(
+      plotOutput("DynamicHeatmap", height = "800px")
+    )
+  )
+)
+
+# Create the heatmap producing function
+server <- function(input, output, session) {
+  output$DynamicHeatmap <- renderPlot({
+
+    # Selected annotations
+    selected_annotations <- input$Annotations
+    annotation_list_pre <- list()
+    for(i in selected_annotations){
+      annotation_list_pre[[i]] <- metadata_pre[,selected_annotations2[[i]]]
+    }
+    annotation_list_post <- list()
+    for(i in selected_annotations){
+      annotation_list_post[[i]] <- metadata_post[,selected_annotations2[[i]]]
+    }
+
+    # Assign colour scales
+    my_col_list <- list(
+      BMI = 
+        c("Healthy" = "yellow", "Overweight" = "orange", "Obese" = "red"),
+      Age = 
+        colorRamp2(c(min(as.numeric(metadata$Age), na.rm = T),
+                     max(as.numeric(metadata$Age), na.rm = T)),
+                   c("white", "darkgray")),
+      Tumour_Stage = 
+        c("T2a" = "#ffa494", "T2b" = "#ff7961", "T2c" = "#ff6347",
+          "T3a" = "#ff4d2e", "T3b" = "#ff3814", "T3c" = "#fa2600"),
+      Gleason_Score = 
+        c("Gleason 7 (3+4)" = "#67e691", "Gleason 7 (4+3)" = "#50c878", 
+          "Gleason 8 (4+4)" = "#378a52",
+          "Gleason 9 (4+5)" = "#205c34", "Gleason 9 (5+4)" = "#154224"),
+      PTEN_Status =
+        c("+" = "yellow", "-" = "red"),
+      Total_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Uniquely_Mapped_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Percentage_Uniquely_Mapped_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Assigned_Reads =
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Percentage_Assigned_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Treatment = 
+        c("PRE" = "#f8766d", "POST" = "#619CFF"),
+      Infusions = 
+        c("4" = "#bae4b3", "5" = "#74c476", "6" = "#238b45", "7" = "#205c34"),
+      PSA = 
+        colorRamp2(c(min(metadata$PSA, na.rm = T),
+                     max(metadata$PSA, na.rm = T)), 
+                   c("white", "red")),
+      Elevated_PSA = 
+        c("Normal_PSA" = "yellow", "Elevated_PSA" = "red"),
+      Tumour_nuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_pc, na.rm = T),
+                     max(metadata$pIGF1R_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Tumour_nonnuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_nn_pc, na.rm = T),
+                     max(metadata$pIGF1R_nn_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Whole_tissue_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_tissue_pc, na.rm = T), 
+                     max(metadata$pIGF1R_whole_tissue_pc, na.rm = T)), 
+                   c("white", "magenta4")), 
+      Whole_tissue_nuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_n_tissue_pc, na.rm = T), 
+                     max(metadata$pIGF1R_whole_n_tissue_pc, na.rm = T)),
+                   c("white", "magenta4")), 
+      Whole_tissue_nonnuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_nn_tissue_pc, na.rm = T),
+                     max(metadata$pIGF1R_whole_nn_tissue_pc, na.rm = T)), 
+                   c("white", "magenta4")),
+      pS6 =
+        colorRamp2(c(min(metadata$pS6_pc, na.rm = T),
+                     max(metadata$pS6_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Androgen_Receptor =
+        colorRamp2(c(min(metadata$AR_pc, na.rm = T),
+                     max(metadata$AR_pc, na.rm = T)), 
+                   c("white", "red")),
+      IGF1 = 
+        colorRamp2(c(min(metadata$IGF1, na.rm = T),
+                     max(metadata$IGF1, na.rm = T)), 
+                   c("white", "magenta4")),
+      IGF_Bioactivity = 
+        colorRamp2(c(min(metadata$serum_igf, na.rm = T), 
+                     max(metadata$serum_igf, na.rm = T)), 
+                   c("white", "magenta4")),
+      IGF1_mRNA =
+        colorRamp2(c(min(metadata$IGF1_mRNA_STAR, na.rm = T),
+                        max(metadata$IGF1_mRNA_STAR, na.rm = T)),
+                      c("white", "magenta4")),
+      FAP_mRNA =
+        colorRamp2(c(min(metadata$FAP_mRNA_STAR, na.rm = T), 
+                       max(metadata$FAP_mRNA_STAR, na.rm = T)),
+                     c("white", "magenta4")),
+      CD8A_mRNA =
+        colorRamp2(c(min(metadata$CD8A_mRNA_STAR, na.rm = T),
+                       max(metadata$CD8A_mRNA_STAR, na.rm = T)),
+                     c("white", "magenta4")),
+      CD8_IHC = 
+        colorRamp2(c(min(metadata$CD8_IHC, na.rm = T), 
+                     max(metadata$CD8_IHC, na.rm = T)), 
+                   c("white", "red")),
+      CD8_Infiltration = 
+        colorRamp2(c(min(metadata$CD8_Infiltration, na.rm = T),
+                     max(metadata$CD8_Infiltration, na.rm = T)),
+                   c("white", "red")),
+      CD8_Circulation = 
+        colorRamp2(c(min(metadata$CD8_Circulation, na.rm = T),
+                     max(metadata$CD8_Circulation, na.rm = T)),
+                   c("white", "red"))
+      )
+    my_col_list_pre <- my_col_list[names(annotation_list_pre)]
+    my_col_list_post <- my_col_list[names(annotation_list_post)]
+    
+    # Construct the annotations
+    ha_pre <- HeatmapAnnotation(
+      df = annotation_list_pre,
+      col = my_col_list_pre,
+      na_col = "gray90"
+    )
+    ha_post <- HeatmapAnnotation(
+      df = annotation_list_post,
+      col = my_col_list_post,
+      na_col = "gray90"
+    )
+    
+    # Plot the heatmaps
+    heatmap1 <- Heatmap(
+      mat1,
+      show_heatmap_legend = F,
+      height = unit(6, "in"),  
+      #width = unit(3, "in"),
+      top_annotation = ha_pre,
+      row_names_gp = gpar(fontsize = 8),
+      column_names_gp = gpar(fontsize = 8),
+      col = col_fun
+    )
+    heatmap2 <- Heatmap(
+      mat2,
+      heatmap_legend_param = list(title = "Z Score"),
+      height = unit(6, "in"),  
+      #width = unit(3, "in"),
+      top_annotation = ha_post,
+      row_names_gp = gpar(fontsize = 8),
+      column_names_gp = gpar(fontsize = 8),
+      col = col_fun
+    )
+    
+    draw(heatmap1 + heatmap2, heatmap_legend_side = "bottom", 
+         annotation_legend_side = "bottom", 
+         merge_legends = TRUE)
+  })
+  
+  session$onSessionEnded(function() {
+    stopApp()
+  })
+  
+}
+
+shinyApp(ui, server, options = list(height = 1000))
+
+
+```
+
+## Generate an interactive heatmap where you can toggle elements on and off using the vst values
+
+```{r interactive_vst_heatmap, message=FALSE, warning=FALSE, fig.height=7}
+
+# Generate a colour function
+col_fun <- colorRamp2(c(-3, 0, 3), c("blue", "white", "red"))
+
+# Import the vst file and extract to a data frame
+vstlogcount <- readRDS(paste(res_directory, "vstlogcount.rds", sep = "/"))
+vstlogcount <- as.data.frame(assay(vstlogcount))
+
+# Convert the rownames from ENSEMBL IDs to gene symbols. Remove any NA or duplicate gene symbols.
+vstlogcount$symbol <- mapIds(org.Hs.eg.db, keys = rownames(vstlogcount), 
+                           column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
+vstlogcount <- vstlogcount[!is.na(vstlogcount$symbol),]
+vstlogcount <- vstlogcount[!duplicated(vstlogcount$symbol),]
+rownames(vstlogcount) <- vstlogcount$symbol
+vstlogcount <- vstlogcount[,-ncol(vstlogcount)]
+
+# Convert to a matrix
+vstlogcount <- as.matrix(vstlogcount)
+
+# Subset so only differentially expressed genes remain
+vst_sig <- vstlogcount[rownames(vstlogcount) %in% res_sig$symbol,]
+
+# Scale the values to Z score
+vst_sig_scaled <- t(scale(t(vst_sig)))
+
+
+# Initialise the user interface
+ui <- fluidPage(
+  titlePanel("DEG Heatmap"),
+  sidebarLayout(
+    sidebarPanel(
+      checkboxGroupInput(
+        "Annotations",
+        "Select Annotations:",
+        choices = names(selected_annotations2),
+        selected = c("Treatment", "PSA", "Whole_tissue_pIGF1R", "pS6", "PTEN_Status")
+      )
+    ),
+    mainPanel(
+      plotOutput("DynamicHeatmap", height = "800px")
+    )
+  )
+)
+
+# Create the heatmap producing function
+server <- function(input, output, session) {
+  output$DynamicHeatmap <- renderPlot({
+
+    # Selected annotations
+    selected_annotations <- input$Annotations
+    annotation_list <- list()
+    for(i in selected_annotations){
+      annotation_list[[i]] <- metadata[,selected_annotations2[[i]]]
+    }
+
+    # Assign colour scales
+    my_col_list <- list(
+      BMI = 
+        c("Healthy" = "yellow", "Overweight" = "orange", "Obese" = "red"),
+      Age = 
+        colorRamp2(c(min(as.numeric(metadata$Age), na.rm = T),
+                     max(as.numeric(metadata$Age), na.rm = T)),
+                   c("white", "darkgray")),
+      Tumour_Stage = 
+        c("T2a" = "#ffa494", "T2b" = "#ff7961", "T2c" = "#ff6347",
+          "T3a" = "#ff4d2e", "T3b" = "#ff3814", "T3c" = "#fa2600"),
+      Gleason_Score = 
+        c("Gleason 7 (3+4)" = "#67e691", "Gleason 7 (4+3)" = "#50c878", 
+          "Gleason 8 (4+4)" = "#378a52",
+          "Gleason 9 (4+5)" = "#205c34", "Gleason 9 (5+4)" = "#154224"),
+      PTEN_Status =
+        c("+" = "yellow", "-" = "red"),
+      Total_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Uniquely_Mapped_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Percentage_Uniquely_Mapped_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Assigned_Reads =
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Percentage_Assigned_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Treatment = 
+        c("PRE" = "#f8766d", "POST" = "#619CFF"),
+      Infusions = 
+        c("4" = "#bae4b3", "5" = "#74c476", "6" = "#238b45", "7" = "#205c34"),
+      PSA = 
+        colorRamp2(c(min(metadata$PSA, na.rm = T),
+                     max(metadata$PSA, na.rm = T)), 
+                   c("white", "red")),
+      Elevated_PSA = 
+        c("Normal_PSA" = "yellow", "Elevated_PSA" = "red"),
+      Tumour_nuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_pc, na.rm = T),
+                     max(metadata$pIGF1R_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Tumour_nonnuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_nn_pc, na.rm = T),
+                     max(metadata$pIGF1R_nn_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Whole_tissue_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_tissue_pc, na.rm = T), 
+                     max(metadata$pIGF1R_whole_tissue_pc, na.rm = T)), 
+                   c("white", "magenta4")), 
+      Whole_tissue_nuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_n_tissue_pc, na.rm = T), 
+                     max(metadata$pIGF1R_whole_n_tissue_pc, na.rm = T)),
+                   c("white", "magenta4")), 
+      Whole_tissue_nonnuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_nn_tissue_pc, na.rm = T),
+                     max(metadata$pIGF1R_whole_nn_tissue_pc, na.rm = T)), 
+                   c("white", "magenta4")),
+      pS6 =
+        colorRamp2(c(min(metadata$pS6_pc, na.rm = T),
+                     max(metadata$pS6_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Androgen_Receptor =
+        colorRamp2(c(min(metadata$AR_pc, na.rm = T),
+                     max(metadata$AR_pc, na.rm = T)), 
+                   c("white", "red")),
+      IGF1 = 
+        colorRamp2(c(min(metadata$IGF1, na.rm = T),
+                     max(metadata$IGF1, na.rm = T)), 
+                   c("white", "magenta4")),
+      IGF_Bioactivity = 
+        colorRamp2(c(min(metadata$serum_igf, na.rm = T), 
+                     max(metadata$serum_igf, na.rm = T)), 
+                   c("white", "magenta4")),
+      IGF1_mRNA =
+        colorRamp2(c(min(metadata$IGF1_mRNA_STAR, na.rm = T),
+                        max(metadata$IGF1_mRNA_STAR, na.rm = T)),
+                      c("white", "magenta4")),
+      FAP_mRNA =
+        colorRamp2(c(min(metadata$FAP_mRNA_STAR, na.rm = T), 
+                       max(metadata$FAP_mRNA_STAR, na.rm = T)),
+                     c("white", "magenta4")),
+      CD8A_mRNA =
+        colorRamp2(c(min(metadata$CD8A_mRNA_STAR, na.rm = T),
+                       max(metadata$CD8A_mRNA_STAR, na.rm = T)),
+                     c("white", "magenta4")),
+      CD8_IHC = 
+        colorRamp2(c(min(metadata$CD8_IHC, na.rm = T), 
+                     max(metadata$CD8_IHC, na.rm = T)), 
+                   c("white", "red")),
+      CD8_Infiltration = 
+        colorRamp2(c(min(metadata$CD8_Infiltration, na.rm = T),
+                     max(metadata$CD8_Infiltration, na.rm = T)),
+                   c("white", "red")),
+      CD8_Circulation = 
+        colorRamp2(c(min(metadata$CD8_Circulation, na.rm = T),
+                     max(metadata$CD8_Circulation, na.rm = T)),
+                   c("white", "red"))
+      )
+    my_col_list <- my_col_list[names(annotation_list)]
+    
+    # Construct the annotation
+    ha <- HeatmapAnnotation(
+      df = annotation_list,
+      col = my_col_list,
+      na_col = "gray90"
+    )
+    
+    # Plot the heatmap
+    heatmap <- Heatmap(
+      vst_sig_scaled,
+      heatmap_legend_param = list(title = "Z Score"),
+      height = unit(6, "in"),  
+      width = unit(4.55, "in"),
+      top_annotation = ha,
+      row_names_gp = gpar(fontsize = 8),
+      column_names_gp = gpar(fontsize = 8),
+      col = col_fun
+    )
+    
+    draw(heatmap, heatmap_legend_side = "bottom", 
+         annotation_legend_side = "bottom", 
+         merge_legends = TRUE)
+  })
+  
+  session$onSessionEnded(function() {
+    stopApp()
+  })
+  
+}
+
+shinyApp(ui, server, options = list(height = 1000))
+
+```
+
+## And agin splitting the PRE and POST samples into different heatmaps
+
+```{r interactive_vst_heatmap_split, message=FALSE, warning=FALSE, fig.height=7}
+
+# Generate a second heatmap where PRE and POST samples are separated
+mat1 <- vst_sig_scaled[,grep("PRE", colnames(vst_sig_scaled))]
+mat2 <- vst_sig_scaled[,grep("POST", colnames(vst_sig_scaled))]
+
+metadata_pre <- metadata[grep("PRE", rownames(metadata)),]
+metadata_post <- metadata[grep("POST", rownames(metadata)),]
+
+# Initialise the user interface
+ui <- fluidPage(
+  titlePanel("DEG Heatmap"),
+  sidebarLayout(
+    sidebarPanel(
+      checkboxGroupInput(
+        "Annotations",
+        "Select Annotations:",
+        choices = names(selected_annotations2),
+        selected = c("Treatment", "PSA", "Whole_tissue_pIGF1R", "pS6", "PTEN_Status")
+      )
+    ),
+    mainPanel(
+      plotOutput("DynamicHeatmap", height = "800px")
+    )
+  )
+)
+
+# Create the heatmap producing function
+server <- function(input, output, session) {
+  output$DynamicHeatmap <- renderPlot({
+
+    # Selected annotations
+    selected_annotations <- input$Annotations
+    annotation_list_pre <- list()
+    for(i in selected_annotations){
+      annotation_list_pre[[i]] <- metadata_pre[,selected_annotations2[[i]]]
+    }
+    annotation_list_post <- list()
+    for(i in selected_annotations){
+      annotation_list_post[[i]] <- metadata_post[,selected_annotations2[[i]]]
+    }
+
+    # Assign colour scales
+    my_col_list <- list(
+      BMI = 
+        c("Healthy" = "yellow", "Overweight" = "orange", "Obese" = "red"),
+      Age = 
+        colorRamp2(c(min(as.numeric(metadata$Age), na.rm = T),
+                     max(as.numeric(metadata$Age), na.rm = T)),
+                   c("white", "darkgray")),
+      Tumour_Stage = 
+        c("T2a" = "#ffa494", "T2b" = "#ff7961", "T2c" = "#ff6347",
+          "T3a" = "#ff4d2e", "T3b" = "#ff3814", "T3c" = "#fa2600"),
+      Gleason_Score = 
+        c("Gleason 7 (3+4)" = "#67e691", "Gleason 7 (4+3)" = "#50c878", 
+          "Gleason 8 (4+4)" = "#378a52",
+          "Gleason 9 (4+5)" = "#205c34", "Gleason 9 (5+4)" = "#154224"),
+      PTEN_Status =
+        c("+" = "yellow", "-" = "red"),
+      Total_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Uniquely_Mapped_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Percentage_Uniquely_Mapped_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Assigned_Reads =
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Percentage_Assigned_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Treatment = 
+        c("PRE" = "#f8766d", "POST" = "#619CFF"),
+      Infusions = 
+        c("4" = "#bae4b3", "5" = "#74c476", "6" = "#238b45", "7" = "#205c34"),
+      PSA = 
+        colorRamp2(c(min(metadata$PSA, na.rm = T),
+                     max(metadata$PSA, na.rm = T)), 
+                   c("white", "red")),
+      Elevated_PSA = 
+        c("Normal_PSA" = "yellow", "Elevated_PSA" = "red"),
+      Tumour_nuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_pc, na.rm = T),
+                     max(metadata$pIGF1R_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Tumour_nonnuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_nn_pc, na.rm = T),
+                     max(metadata$pIGF1R_nn_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Whole_tissue_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_tissue_pc, na.rm = T), 
+                     max(metadata$pIGF1R_whole_tissue_pc, na.rm = T)), 
+                   c("white", "magenta4")), 
+      Whole_tissue_nuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_n_tissue_pc, na.rm = T), 
+                     max(metadata$pIGF1R_whole_n_tissue_pc, na.rm = T)),
+                   c("white", "magenta4")), 
+      Whole_tissue_nonnuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_nn_tissue_pc, na.rm = T),
+                     max(metadata$pIGF1R_whole_nn_tissue_pc, na.rm = T)), 
+                   c("white", "magenta4")),
+      pS6 =
+        colorRamp2(c(min(metadata$pS6_pc, na.rm = T),
+                     max(metadata$pS6_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Androgen_Receptor =
+        colorRamp2(c(min(metadata$AR_pc, na.rm = T),
+                     max(metadata$AR_pc, na.rm = T)), 
+                   c("white", "red")),
+      IGF1 = 
+        colorRamp2(c(min(metadata$IGF1, na.rm = T),
+                     max(metadata$IGF1, na.rm = T)), 
+                   c("white", "magenta4")),
+      IGF_Bioactivity = 
+        colorRamp2(c(min(metadata$serum_igf, na.rm = T), 
+                     max(metadata$serum_igf, na.rm = T)), 
+                   c("white", "magenta4")),
+      IGF1_mRNA =
+        colorRamp2(c(min(metadata$IGF1_mRNA_STAR, na.rm = T),
+                        max(metadata$IGF1_mRNA_STAR, na.rm = T)),
+                      c("white", "magenta4")),
+      FAP_mRNA =
+        colorRamp2(c(min(metadata$FAP_mRNA_STAR, na.rm = T), 
+                       max(metadata$FAP_mRNA_STAR, na.rm = T)),
+                     c("white", "magenta4")),
+      CD8A_mRNA =
+        colorRamp2(c(min(metadata$CD8A_mRNA_STAR, na.rm = T),
+                       max(metadata$CD8A_mRNA_STAR, na.rm = T)),
+                     c("white", "magenta4")),
+      CD8_IHC = 
+        colorRamp2(c(min(metadata$CD8_IHC, na.rm = T), 
+                     max(metadata$CD8_IHC, na.rm = T)), 
+                   c("white", "red")),
+      CD8_Infiltration = 
+        colorRamp2(c(min(metadata$CD8_Infiltration, na.rm = T),
+                     max(metadata$CD8_Infiltration, na.rm = T)),
+                   c("white", "red")),
+      CD8_Circulation = 
+        colorRamp2(c(min(metadata$CD8_Circulation, na.rm = T),
+                     max(metadata$CD8_Circulation, na.rm = T)),
+                   c("white", "red"))
+      )
+    my_col_list_pre <- my_col_list[names(annotation_list_pre)]
+    my_col_list_post <- my_col_list[names(annotation_list_post)]
+    
+    # Construct the annotations
+    ha_pre <- HeatmapAnnotation(
+      df = annotation_list_pre,
+      col = my_col_list_pre,
+      na_col = "gray90"
+    )
+    ha_post <- HeatmapAnnotation(
+      df = annotation_list_post,
+      col = my_col_list_post,
+      na_col = "gray90"
+    )
+    
+    # Plot the heatmaps
+    heatmap1 <- Heatmap(
+      mat1,
+      show_heatmap_legend = F,
+      height = unit(6, "in"),  
+      #width = unit(4.55, "in"),
+      top_annotation = ha_pre,
+      row_names_gp = gpar(fontsize = 8),
+      column_names_gp = gpar(fontsize = 8),
+      col = col_fun
+    )
+    heatmap2 <- Heatmap(
+      mat2,
+      heatmap_legend_param = list(title = "Z Score"),
+      height = unit(6, "in"),  
+      #width = unit(4.55, "in"),
+      top_annotation = ha_post,
+      row_names_gp = gpar(fontsize = 8),
+      column_names_gp = gpar(fontsize = 8),
+      col = col_fun
+    )
+    
+    draw(heatmap1 + heatmap2, heatmap_legend_side = "bottom", 
+         annotation_legend_side = "bottom", 
+         merge_legends = TRUE)
+  })
+  
+  session$onSessionEnded(function() {
+    stopApp()
+  })
+  
+}
+
+shinyApp(ui, server, options = list(width = 1000, height = 1000))
+
+```
+
+## Visualise the log fold changes between paired samples of the differentially expressed genes 
+
+First, prepare the data
+
+```{r interactive_logFC_heatmap, message=FALSE, warning=FALSE, fig.height=7}
+
+# Prepare the normalised logcounts file
+norm_counts <- as.data.frame(counts(dds, normalized = T))
+
+# Convert the rownames from ENSEMBL IDs to gene symbols. Remove any NA or duplicate gene symbols.
+norm_counts$symbol <- mapIds(org.Hs.eg.db, keys = rownames(norm_counts), column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
+norm_counts <- norm_counts[!is.na(norm_counts$symbol),]
+norm_counts <- norm_counts[!duplicated(norm_counts$symbol),]
+rownames(norm_counts) <- norm_counts$symbol
+norm_counts <- norm_counts[,-ncol(norm_counts)]
+
+# Add a small pseudocount to prevent divisions by zero
+norm_counts <- norm_counts + 0.001 
+
+# Identify unpaired samples for which log fold changes cannot be calculated
+unpaired_samples <- names(which(table(substr(colnames(norm_counts), 1, 2)) == 1))
+unpaired_samples <- gsub("P", "", unpaired_samples)
+
+# Remove these columns from the data
+norm_counts <- norm_counts[, !grepl(paste0("^", unpaired_samples, collapse = "|"), names(norm_counts))]
+
+# Split the data into two dataframes, one for pre-treatment samples and one for post-treatment samples
+pre_norm_counts <- norm_counts[,grep("PRE", colnames(norm_counts))]
+post_norm_counts <- norm_counts[,grep("POST", colnames(norm_counts))]
+
+# Calculate the fold changes and remove infitine or NA values
+if(all(substr(colnames(pre_norm_counts), 1, 2) == substr(colnames(post_norm_counts), 1, 2))){
+  foldchanges <- post_norm_counts/pre_norm_counts
+  logfoldchanges <- log2(foldchanges)
+  logfoldchanges[is.infinite(as.matrix(logfoldchanges))] <- NA
+  logfoldchanges[is.nan(as.matrix(logfoldchanges))] <- NA
+} else {
+  cat("ERROR - samples are not in the same order in pre and post")
+}
+
+# Extract significant results
+logfoldchanges_sig <- logfoldchanges[rownames(logfoldchanges) %in% res_sig$symbol,]
+
+```
+
+Second, generate the heatmap
+
+```{r logFC_heatmap, message=FALSE, warning=FALSE, fig.height=7}
+
+# Generate a colour function
+col_fun <- colorRamp2(c(-6, 0, 6), c("blue", "white", "red"))
+
+# Generate a new annotation including only paired post-treatment samples
+metadata_post_filt <- metadata_post[ !grepl(paste0("^", unpaired_samples, collapse = "|"), rownames(metadata_post)),]
+
+# Initialise the user interface
+ui <- fluidPage(
+  titlePanel("DEG Heatmap"),
+  sidebarLayout(
+    sidebarPanel(
+      checkboxGroupInput(
+        "Annotations",
+        "Select Annotations:",
+        choices = names(selected_annotations2),
+        selected = c("Treatment", "PSA", "Whole_tissue_pIGF1R", "pS6", "PTEN_Status")
+      )
+    ),
+    mainPanel(
+      plotOutput("DynamicHeatmap", height = "800px")
+    )
+  )
+)
+
+# Create the heatmap producing function
+server <- function(input, output, session) {
+  output$DynamicHeatmap <- renderPlot({
+
+    # Selected annotations
+    selected_annotations <- input$Annotations
+    annotation_list <- list()
+    for(i in selected_annotations){
+      annotation_list[[i]] <- metadata_post_filt[,selected_annotations2[[i]]]
+    }
+
+    # Assign colour scales
+    my_col_list <- list(
+      BMI = 
+        c("Healthy" = "yellow", "Overweight" = "orange", "Obese" = "red"),
+      Age = 
+        colorRamp2(c(min(as.numeric(metadata$Age), na.rm = T),
+                     max(as.numeric(metadata$Age), na.rm = T)),
+                   c("white", "darkgray")),
+      Tumour_Stage = 
+        c("T2a" = "#ffa494", "T2b" = "#ff7961", "T2c" = "#ff6347",
+          "T3a" = "#ff4d2e", "T3b" = "#ff3814", "T3c" = "#fa2600"),
+      Gleason_Score = 
+        c("Gleason 7 (3+4)" = "#67e691", "Gleason 7 (4+3)" = "#50c878", 
+          "Gleason 8 (4+4)" = "#378a52",
+          "Gleason 9 (4+5)" = "#205c34", "Gleason 9 (5+4)" = "#154224"),
+      PTEN_Status =
+        c("+" = "yellow", "-" = "red"),
+      Total_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Uniquely_Mapped_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Percentage_Uniquely_Mapped_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Assigned_Reads =
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Percentage_Assigned_Reads = 
+        c("Low" = "#bae4b3", "Normal" = "#74c476", "High" = "#238b45"),
+      Treatment = 
+        c("PRE" = "#f8766d", "POST" = "#619CFF"),
+      Infusions = 
+        c("4" = "#bae4b3", "5" = "#74c476", "6" = "#238b45", "7" = "#205c34"),
+      PSA = 
+        colorRamp2(c(min(metadata$PSA, na.rm = T),
+                     max(metadata$PSA, na.rm = T)), 
+                   c("white", "red")),
+      Elevated_PSA = 
+        c("Normal_PSA" = "yellow", "Elevated_PSA" = "red"),
+      Tumour_nuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_pc, na.rm = T),
+                     max(metadata$pIGF1R_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Tumour_nonnuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_nn_pc, na.rm = T),
+                     max(metadata$pIGF1R_nn_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Whole_tissue_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_tissue_pc, na.rm = T), 
+                     max(metadata$pIGF1R_whole_tissue_pc, na.rm = T)), 
+                   c("white", "magenta4")), 
+      Whole_tissue_nuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_n_tissue_pc, na.rm = T), 
+                     max(metadata$pIGF1R_whole_n_tissue_pc, na.rm = T)),
+                   c("white", "magenta4")), 
+      Whole_tissue_nonnuclear_pIGF1R = 
+        colorRamp2(c(min(metadata$pIGF1R_whole_nn_tissue_pc, na.rm = T),
+                     max(metadata$pIGF1R_whole_nn_tissue_pc, na.rm = T)), 
+                   c("white", "magenta4")),
+      pS6 =
+        colorRamp2(c(min(metadata$pS6_pc, na.rm = T),
+                     max(metadata$pS6_pc, na.rm = T)),
+                   c("white", "magenta4")),
+      Androgen_Receptor =
+        colorRamp2(c(min(metadata$AR_pc, na.rm = T),
+                     max(metadata$AR_pc, na.rm = T)), 
+                   c("white", "red")),
+      IGF1 = 
+        colorRamp2(c(min(metadata$IGF1, na.rm = T),
+                     max(metadata$IGF1, na.rm = T)), 
+                   c("white", "magenta4")),
+      IGF_Bioactivity = 
+        colorRamp2(c(min(metadata$serum_igf, na.rm = T), 
+                     max(metadata$serum_igf, na.rm = T)), 
+                   c("white", "magenta4")),
+      IGF1_mRNA =
+        colorRamp2(c(min(metadata$IGF1_mRNA_STAR, na.rm = T),
+                        max(metadata$IGF1_mRNA_STAR, na.rm = T)),
+                      c("white", "magenta4")),
+      FAP_mRNA =
+        colorRamp2(c(min(metadata$FAP_mRNA_STAR, na.rm = T), 
+                       max(metadata$FAP_mRNA_STAR, na.rm = T)),
+                     c("white", "magenta4")),
+      CD8A_mRNA =
+        colorRamp2(c(min(metadata$CD8A_mRNA_STAR, na.rm = T),
+                       max(metadata$CD8A_mRNA_STAR, na.rm = T)),
+                     c("white", "magenta4")),
+      CD8_IHC = 
+        colorRamp2(c(min(metadata$CD8_IHC, na.rm = T), 
+                     max(metadata$CD8_IHC, na.rm = T)), 
+                   c("white", "red")),
+      CD8_Infiltration = 
+        colorRamp2(c(min(metadata$CD8_Infiltration, na.rm = T),
+                     max(metadata$CD8_Infiltration, na.rm = T)),
+                   c("white", "red")),
+      CD8_Circulation = 
+        colorRamp2(c(min(metadata$CD8_Circulation, na.rm = T),
+                     max(metadata$CD8_Circulation, na.rm = T)),
+                   c("white", "red"))
+      )
+    my_col_list <- my_col_list[names(annotation_list)]
+    
+    # Construct the annotation
+    ha <- HeatmapAnnotation(
+      df = annotation_list,
+      col = my_col_list,
+      na_col = "gray90"
+    )
+    
+    # Plot the heatmap
+    heatmap <- Heatmap(
+      logfoldchanges_sig,
+      heatmap_legend_param = list(title = "Log2FC"),
+      height = unit(6, "in"),  
+      width = unit(4.55, "in"),
+      top_annotation = ha,
+      row_names_gp = gpar(fontsize = 8),
+      column_names_gp = gpar(fontsize = 8),
+      col = col_fun
+    )
+    
+    draw(heatmap, heatmap_legend_side = "bottom", 
+         annotation_legend_side = "bottom", 
+         merge_legends = TRUE)
+  })
+  
+  session$onSessionEnded(function() {
+    stopApp()
+  })
+  
+}
+
+shinyApp(ui, server, options = list(height = 1000))
+
+```
+
